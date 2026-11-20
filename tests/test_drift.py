@@ -12,9 +12,11 @@ from examshield.benchmark import load_items
 from examshield.cli import app
 from examshield.errors import ExamShieldError
 from examshield.profiles import Profile, load_profile, parse_profile
+from examshield.protect.pipeline import protect_bytes
 from examshield.verify.drift import (
     FAILED,
     NOT_APPLICABLE,
+    PARTIAL,
     PASSED,
     UNVERIFIED,
     Current,
@@ -150,17 +152,72 @@ def test_a_model_is_held_only_when_its_accuracy_halves(protected: float, state: 
         assert any("deprecated로 표시" in warning for warning in result.warnings)
 
 
-def test_the_best_channel_for_the_attacker_decides() -> None:
+def test_each_attack_path_gets_its_own_verdict() -> None:
     report = make_report(PROFILE, protected=0.0)
     report["results"] += [
         row("reader", "image", "control", 0.9),
         row("reader", "image", "protected", 0.9),
     ]
 
-    verdict = model_verdicts(report)[0]
+    verdicts = model_verdicts(report)
 
-    assert (verdict.control, verdict.protected, verdict.held) == (1.0, 0.9, False)
-    assert assess(PROFILE, report, NOW, CURRENT).state == FAILED
+    assert [(v.channel, v.control, v.protected, v.held) for v in verdicts] == [
+        ("text", 1.0, 0.0, True),
+        ("image", 0.9, 0.9, False),
+    ]
+
+
+def test_a_profile_that_blocks_only_its_declared_path_is_partial_not_passed() -> None:
+    """a-remap-decoy는 텍스트 복사만 막겠다고 한다. 다른 경로가 열려 있으면 '통과'가 아니다."""
+    report = make_report(PROFILE, protected=0.0)
+    report["results"] += [
+        row("reader", "image", "control", 1.0),
+        row("reader", "image", "protected", 1.0),
+    ]
+
+    result = assess(PROFILE, report, NOW, CURRENT)
+    text = format_assessment(result)
+
+    assert PROFILE.blocks == ("text",)
+    assert result.state == PARTIAL and "일부 경로만 막음" in result.label
+    assert any("막지 못한다: 화면 캡처·촬영(reader" in warning for warning in result.warnings)
+    assert not any("deprecated로 표시" in warning for warning in result.warnings)
+    assert "텍스트 복사: 정답률 대조군 100.0% → 변환본 0.0%  막음" in text
+    assert "화면 캡처·촬영: 정답률 대조군 100.0% → 변환본 100.0%  못 막음" in text
+
+
+def test_a_profile_without_declared_paths_must_block_every_measured_path() -> None:
+    strict = parse_profile(
+        {"name": "x", "scenario": "A", "status": "experimental", "techniques": [{"id": "decoy"}]}
+    )
+    report = make_report(strict, protected=0.0)
+    report["results"] += [
+        row("reader", "image", "control", 1.0),
+        row("reader", "image", "protected", 1.0),
+    ]
+
+    assert assess(strict, report, NOW, CURRENT).state == FAILED
+
+
+def test_unknown_paths_in_a_profile_are_refused() -> None:
+    with pytest.raises(ExamShieldError, match="blocks"):
+        parse_profile(
+            {"name": "x", "scenario": "A", "status": "active", "techniques": [], "blocks": ["fax"]}
+        )
+
+
+def test_the_shipped_claude_records_read_as_measured() -> None:
+    """실제로 잰 두 기록. a-remap-decoy는 텍스트 복사만 막았고, a-decoy는 그것도 못 막았다."""
+    folder = Path(__file__).resolve().parent.parent / "examshield/profiles/verified"
+    states = {}
+    for name in ("a-remap-decoy", "a-decoy"):
+        report = json.loads((folder / f"{name}.json").read_text(encoding="utf-8"))
+        when = datetime.fromisoformat(report["created_at"])
+        current = Current(report["tool_version"], ITEMS.version, report["benchmark"]["sha256"])
+        states[name] = assess(load_profile(name), report, when, current).state
+
+    assert states == {"a-remap-decoy": PARTIAL, "a-decoy": FAILED}
+    assert load_profile("a-decoy").status == "deprecated"
 
 
 def test_one_broken_model_fails_the_profile_even_if_another_holds() -> None:
@@ -169,8 +226,8 @@ def test_one_broken_model_fails_the_profile_even_if_another_holds() -> None:
         {"provider": "y", "name": "strong", "version": "2", "kind": "cloud", "note": ""}
     )
     report["results"] += [
-        row("strong", "image", "control", 1.0),
-        row("strong", "image", "protected", 1.0),
+        row("strong", "text", "control", 1.0),
+        row("strong", "text", "protected", 1.0),
     ]
 
     result = assess(PROFILE, report, NOW, CURRENT)
@@ -212,7 +269,7 @@ def test_deprecated_profiles_warn_without_any_report() -> None:
     )
 
 
-@pytest.mark.parametrize("name", ["none", "none-print", "a-watermark"])
+@pytest.mark.parametrize("name", ["none", "none-print", "a-watermark", "b-dots"])
 def test_profiles_without_reading_resistance_are_not_judged(name: str) -> None:
     profile = load_profile(name)
 
@@ -323,14 +380,18 @@ def cli_report(profile: Profile, days_ago: int, **changes: Any) -> dict[str, Any
 def test_protect_reads_reports_and_records_to_decide_what_to_warn(
     sample_file: Path, tmp_path: Path, isolated_verification: dict[str, Path]
 ) -> None:
-    profile = load_profile("a-decoy")
-    args = ["protect", str(sample_file), "--profile", "a-decoy", "--out"]
+    profile = load_profile("a-glyph-remap")
+    args = ["protect", str(sample_file), "--profile", "a-glyph-remap", "--out"]
 
     save(isolated_verification["reports"], "fresh.json", cli_report(profile, 1))
     fresh = runner.invoke(app, [*args, str(tmp_path / "one")])
     save(isolated_verification["reports"], "fresh.json", cli_report(profile, 45))
     old = runner.invoke(app, [*args, str(tmp_path / "two")])
-    save(isolated_verification["records"], "a-decoy.json", cli_report(profile, 2, protected=0.9))
+    save(
+        isolated_verification["records"],
+        "a-glyph-remap.json",
+        cli_report(profile, 2, protected=0.9),
+    )
     broken = runner.invoke(app, [*args, str(tmp_path / "three")])
 
     assert fresh.exit_code == old.exit_code == broken.exit_code == 0
@@ -409,7 +470,7 @@ def test_report_command_adds_the_verdict(tmp_path: Path) -> None:
 
     assert first.exit_code == second.exit_code == 0
     assert "기준 통과" in first.stdout and "40일 전" in first.stdout
-    assert "reader [cloud] 정답률 대조군 100.0% → 변환본 25.0%  막음" in first.stdout
+    assert "reader [cloud] 텍스트 복사: 정답률 대조군 100.0% → 변환본 25.0%  막음" in first.stdout
     assert "마지막 검증 뒤에 바뀌었다" in second.stdout
 
 
@@ -518,7 +579,7 @@ def test_a_partly_measured_model_is_never_reported_as_held(rows: list[dict[str, 
     result = assess(PROFILE, with_rows(*rows), NOW, CURRENT)
 
     assert result.state == UNVERIFIED
-    assert result.models[0].held is None
+    assert any(verdict.held is None for verdict in result.models)
     assert any("판정하지 못한 AI 모델" in warning for warning in result.warnings)
     assert "판정 못 함" in format_assessment(result)
 
@@ -670,3 +731,77 @@ def test_a_record_is_only_written_under_a_builtin_profile_name(tmp_path: Path) -
     with pytest.raises(ExamShieldError):
         write_record(report, tmp_path / "verified")
     assert not (tmp_path / "escaped.json").exists()
+
+
+def test_status_and_description_do_not_change_the_profile_hash(sample_pdf: bytes) -> None:
+    """상태를 deprecated로 바꿔도 그 근거가 된 검증 기록과 복사본이 그대로여야 한다."""
+    base = {
+        "name": "x",
+        "scenario": "A",
+        "status": "experimental",
+        "description": "처음 설명",
+        "techniques": [{"id": "glyph_remap"}, {"id": "decoy"}],
+    }
+    first = parse_profile(base)
+    relabelled = parse_profile(
+        {**base, "name": "y", "status": "deprecated", "description": "바꾼 설명"}
+    )
+    retuned = parse_profile({**base, "techniques": [{"id": "decoy"}]})
+    reparametrised = parse_profile(
+        {
+            **base,
+            "techniques": [
+                {"id": "glyph_remap"},
+                {"id": "decoy", "params": {"template": "{answer}"}},
+            ],
+        }
+    )
+
+    assert first.sha256 == relabelled.sha256
+    assert protect_bytes(sample_pdf, first).pdf == protect_bytes(sample_pdf, relabelled).pdf
+    assert len({first.sha256, retuned.sha256, reparametrised.sha256}) == 3
+
+
+def test_a_report_survives_marking_its_profile_deprecated() -> None:
+    measured = make_report(PROFILE, protected=0.9)
+    marked = parse_profile(
+        {
+            "name": PROFILE.name,
+            "scenario": PROFILE.scenario,
+            "status": "deprecated",
+            "description": "기준에 못 미쳤다",
+            "techniques": [
+                {"id": entry.id, "params": entry.params} for entry in PROFILE.techniques
+            ],
+        }
+    )
+
+    result = assess(marked, measured, NOW, CURRENT)
+
+    assert marked.sha256 == PROFILE.sha256
+    assert result.state == FAILED
+    assert not any("deprecated로 표시해야" in warning for warning in result.warnings)
+
+
+def test_shipped_verification_records_match_their_profiles() -> None:
+    """저장소에 든 검증 기록이 지금의 프로파일과 맞는지 본다. 맞지 않으면 경고가 사라진다."""
+    folder = Path(__file__).resolve().parent.parent / "examshield/profiles/verified"
+    records = sorted(folder.glob("*.json"))
+
+    assert records, "검증 기록이 하나도 없다"
+    for path in records:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        profile = load_profile(path.stem)
+        assert report["profile"]["name"] == profile.name
+        assert report["profile"]["sha256"] == profile.sha256, path.name
+        assert record_refusal(report) is None
+        assert "question" not in json.dumps(report)
+
+
+def test_tracking_profiles_say_that_they_do_not_stop_reading() -> None:
+    dots = assess(load_profile("b-dots"), None, NOW, CURRENT)
+    control = assess(load_profile("none"), None, NOW, CURRENT)
+
+    assert dots.state == NOT_APPLICABLE
+    assert any("유출 추적용" in warning for warning in dots.warnings)
+    assert control.warnings == ()

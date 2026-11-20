@@ -1,7 +1,7 @@
 name: b-dots
 scenario: B
 status: experimental
-description: 인쇄용. 쪽 전체에 미세한 점 무늬를 찍는다. --copies와 함께 쓰면 무늬가 수험번호마다 달라서, 인쇄물을 찍은 사진에서 수험번호를 찾을 수 있다. AI 판독을 막는 효과는 확인되지 않았다.
+description: 인쇄용. 쪽 전체에 미세한 점 무늬를 찍는다. --copies와 함께 쓰면 무늬가 수험번호마다 달라서, 인쇄물을 찍은 사진에서 수험번호를 찾을 수 있다. 유출 추적용이다. AI 판독은 막지 못한다. Claude(claude-opus-5-5)에 인쇄·촬영을 흉내 낸 그림을 줬을 때 판독률과 정답률이 무늬 없는 것과 똑같이 100%였다(2026-11-21).
 techniques:
   - id: dots
     params:

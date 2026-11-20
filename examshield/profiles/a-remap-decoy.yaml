@@ -1,7 +1,8 @@
 name: a-remap-decoy
 scenario: A
 status: experimental
-description: 글리프 매핑 교란과 숨은 미끼를 함께 쓴다. 추출한 텍스트에서 본문은 엉뚱한 글자가 되고 미끼 지시문만 읽힌다.
+description: 글리프 매핑 교란과 숨은 미끼를 함께 쓴다. 복사하거나 추출한 텍스트에서 본문은 엉뚱한 글자가 되고 미끼 지시문만 읽힌다. 화면 캡처나 파일 올리기로 읽는 AI는 막지 못한다. Claude(claude-opus-5-5)로 확인했다(2026-11-21).
+blocks: [text]
 techniques:
   - id: glyph_remap
   - id: decoy

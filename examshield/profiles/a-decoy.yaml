@@ -1,6 +1,7 @@
 name: a-decoy
 scenario: A
-status: experimental
-description: 쪽마다 보이지 않는 미끼 지시문을 넣는다. 파일을 그대로 넣은 AI가 미끼가 가리키는 답을 내도록 유도한다.
+status: deprecated
+description: 쪽마다 보이지 않는 미끼 지시문을 넣는다. Claude(claude-opus-5-5)로 재 보니 문제를 읽을 수 있으면 미끼를 거의 따르지 않았다(2026-11-21). 미끼는 글자를 섞는 a-remap-decoy와 함께 쓴다.
+blocks: [text, file]
 techniques:
   - id: decoy

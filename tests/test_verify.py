@@ -12,6 +12,7 @@ from examshield.cli import app
 from examshield.errors import ExamShieldError
 from examshield.profiles import load_profile, parse_profile
 from examshield.protect.pipeline import protect_bytes
+from examshield.verify.drift import record_refusal
 from examshield.verify.models.base import ModelClient
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.mock import MockModel
@@ -194,3 +195,47 @@ def test_cli_verify_measures_a_profile_with_techniques(tmp_path: Path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "변환본" in result.output
+
+
+def test_verify_can_be_limited_to_chosen_channels(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "verify", "--profile", "a-decoy", "--models", "mock",
+            "--channels", "text", "--out", str(tmp_path),
+        ],
+    )  # fmt: skip
+    report = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+
+    assert result.exit_code == 0, result.output
+    assert {row["channel"] for row in report["results"]} == {"text"}
+    assert report["channels_limited"] is True
+    assert "검증 기록으로는 쓰지 않는다" in result.stdout
+    assert record_refusal(report) is not None
+
+
+def test_bad_channel_choices_are_refused(tmp_path: Path) -> None:
+    def run(*extra: str) -> Any:
+        return CliRunner().invoke(
+            app,
+            ["verify", "--profile", "a-decoy", "--models", "mock", "--out", str(tmp_path), *extra],
+        )
+
+    unknown = run("--channels", "image,fax")
+    recorded = run("--channels", "text", "--record")
+    unused = CliRunner().invoke(
+        app,
+        ["verify", "--profile", "none-print", "--models", "mock", "--channels", "text",
+         "--out", str(tmp_path)],
+    )  # fmt: skip
+
+    assert unknown.exit_code == 2 and "모르는 경로" in unknown.stderr
+    assert recorded.exit_code == 2 and "--channels" in recorded.stderr
+    assert unused.exit_code == 2 and "재지 않는다" in unused.stderr
+    assert not list(tmp_path.glob("*.json"))
+
+
+def test_a_full_run_is_not_marked_as_channel_limited() -> None:
+    report = control_report()
+
+    assert report["channels_limited"] is False

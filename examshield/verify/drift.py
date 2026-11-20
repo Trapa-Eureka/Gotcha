@@ -21,18 +21,23 @@ MAX_AGE_DAYS = 30
 # 변환본의 정답률이 대조군의 이 비율 이하로 떨어져야 그 모델을 막았다고 본다.
 HOLD_RATIO = 0.5
 AI_KINDS = ("local", "relayed", "cloud")
-TRACKING_ONLY = ("watermark",)
+# 유출 추적용 기법. AI 판독을 막는 기법이 아니라서 판독 저항 판정의 대상이 아니다.
+# dots는 Claude로 재 보니 판독을 전혀 방해하지 못했다(2026-11-21, verified/b-dots.json).
+TRACKING_ONLY = ("watermark", "dots")
 MAX_REPORT_BYTES = 5_000_000
 MAX_CLOCK_SKEW = timedelta(days=1)
 VARIANTS = ("control", "protected")
 
 UNVERIFIED = "unverified"
 PASSED = "passed"
+PARTIAL = "partial"
 FAILED = "failed"
 NOT_APPLICABLE = "not_applicable"
 STATE_LABELS = {
     UNVERIFIED: "검증 안 됨",
     PASSED: "기준 통과",
+    # 막겠다고 한 경로는 막았지만, 공격자가 쓸 수 있는 다른 경로가 열려 있다.
+    PARTIAL: "일부 경로만 막음",
     FAILED: "기준 미달",
     NOT_APPLICABLE: "대상 아님",
 }
@@ -40,8 +45,11 @@ STATE_LABELS = {
 
 @dataclass(frozen=True)
 class ModelVerdict:
+    """AI 모델 하나가 공격 경로 하나로 푼 결과."""
+
     model: str
     kind: str
+    channel: str
     control: float | None
     protected: float | None
     # True 막음, False 못 막음, None 판정 못 함
@@ -184,42 +192,53 @@ def resists_reading(profile: Profile) -> bool:
     return any(technique.id not in TRACKING_ONLY for technique in profile.techniques)
 
 
-def _verdict(name: str, kind: str, rows: list[Row]) -> ModelVerdict:
-    """한 모델의 판정. 가장 잘 통한 경로의 정답률을 대조군과 변환본에서 뽑아 비교한다.
+CHANNEL_LABELS = {"text": "텍스트 복사", "image": "화면 캡처·촬영", "file": "파일 올리기"}
 
-    부정행위자는 가장 잘 풀리는 경로를 고르므로 경로별 평균이 아니라 최댓값을 쓴다.
+
+def channel_label(channel: str) -> str:
+    return CHANNEL_LABELS.get(channel, channel)
+
+
+def _verdict(name: str, kind: str, channel: str, rows: list[Row]) -> ModelVerdict:
+    """한 모델이 한 경로로 푼 결과의 판정. 대조군과 변환본의 정답률을 비교한다.
+
     일부만 잰 결과로 '막음'이라고 하지 않는다. '못 막음'은 일부만 재도 알 수 있다.
     """
     scores: dict[str, list[float]] = {variant: [] for variant in VARIANTS}
-    channels: dict[str, set[str]] = {variant: set() for variant in VARIANTS}
     partial = False
     for row in rows:
-        channels[row.variant].add(row.channel)
         if row.accuracy is None or row.errors > 0:
             partial = True
         if row.accuracy is not None:
             scores[row.variant].append(row.accuracy)
     control = max(scores["control"], default=None)
     protected = max(scores["protected"], default=None)
+    seen = {row.variant for row in rows}
     if control and protected is not None and protected > control * HOLD_RATIO:
-        return ModelVerdict(name, kind, control, protected, False)
-    if partial or channels["control"] != channels["protected"] or protected is None:
+        return ModelVerdict(name, kind, channel, control, protected, False)
+    if partial or seen != set(VARIANTS) or protected is None:
         reason = "오류가 났거나 빠진 호출이 있어 일부만 쟀다"
-        return ModelVerdict(name, kind, control, protected, None, reason)
+        return ModelVerdict(name, kind, channel, control, protected, None, reason)
     if not control:
         # 대조군도 못 푼 모델로는 변환의 효과를 알 수 없다.
-        return ModelVerdict(name, kind, control, protected, None, "대조군 문항을 풀지 못했다")
-    return ModelVerdict(name, kind, control, protected, True)
+        return ModelVerdict(
+            name, kind, channel, control, protected, None, "대조군 문항을 풀지 못했다"
+        )
+    return ModelVerdict(name, kind, channel, control, protected, True)
 
 
 def model_verdicts(report: dict[str, Any] | Checked) -> tuple[ModelVerdict, ...]:
+    """AI 모델마다, 공격 경로마다 판정 하나. 부정행위자는 이 가운데 가장 잘 풀리는 경로를 쓴다."""
     checked = report if isinstance(report, Checked) else check_report(report)
-    grouped: dict[str, list[Row]] = {}
+    grouped: dict[tuple[str, str], list[Row]] = {}
     for row in checked.rows:
         if checked.kinds[row.model] in AI_KINDS:
-            grouped.setdefault(row.model, []).append(row)
+            grouped.setdefault((row.model, row.channel), []).append(row)
+    order = {channel: index for index, channel in enumerate(CHANNEL_LABELS)}
+    keys = sorted(grouped, key=lambda key: (key[0], order.get(key[1], 99), key[1]))
     return tuple(
-        _verdict(name, checked.kinds[name], rows) for name, rows in sorted(grouped.items())
+        _verdict(model, checked.kinds[model], channel, grouped[(model, channel)])
+        for model, channel in keys
     )
 
 
@@ -236,6 +255,8 @@ def record_refusal(report: dict[str, Any], now: datetime | None = None) -> str |
         checked = check_report(report, now)
     except ValueError as error:
         return str(error)
+    if isinstance(report, dict) and report.get("channels_limited"):
+        return "경로를 골라서 잰 결과다. 재지 않은 경로가 있다."
     if checked.benchmark_version == "custom":
         return "내장 문항 세트로 잰 결과가 아니다."
     if not measured_by_ai(checked):
@@ -311,11 +332,16 @@ def assess(
     warnings: list[str] = []
     if profile.status == "deprecated":
         warnings.append(
-            f"프로파일 '{name}'은 deprecated다. 검증에서 기준에 못 미쳐 더는 권하지 않는다."
+            f"프로파일 '{name}'은 deprecated다. 막겠다고 한 경로를 검증에서 막지 못해 "
+            "더는 권하지 않는다."
         )
     elif profile.status == "experimental":
         warnings.append(f"프로파일 '{name}'은 experimental이다. 효과가 확인되지 않았다.")
     if not resists_reading(profile):
+        if profile.techniques:
+            warnings.append(
+                f"프로파일 '{name}'은 유출 추적용이다. AI가 문서를 읽고 푸는 것은 막지 않는다."
+            )
         return Assessment(NOT_APPLICABLE, None, None, (), tuple(warnings))
     rerun = f"`examshield verify --profile {name} --models all`"
     if report is None:
@@ -333,26 +359,42 @@ def assess(
     created = checked.created
     age_days = max(0, (now - created).days)
     verdicts = model_verdicts(checked)
-    broken = [verdict for verdict in verdicts if verdict.held is False]
+    # 프로파일이 막겠다고 한 경로. 적혀 있지 않으면 잰 경로를 전부 막아야 한다.
+    claimed = set(profile.blocks) or {verdict.channel for verdict in verdicts}
+    broken = [v for v in verdicts if v.held is False and v.channel in claimed]
+    left_open = [v for v in verdicts if v.held is False and v.channel not in claimed]
     unknown = [verdict for verdict in verdicts if verdict.held is None]
+
+    def scores(found: list[ModelVerdict]) -> str:
+        return ", ".join(
+            f"{channel_label(v.channel)}({v.model}, 정답률 {v.control:.0%} → {v.protected:.0%})"
+            for v in found
+        )
+
     if broken:
         state = FAILED
-        names = ", ".join(
-            f"{verdict.model}(정답률 {verdict.control:.0%} → {verdict.protected:.0%})"
-            for verdict in broken
-        )
         warnings.append(
-            f"프로파일 '{name}'이 기준에 못 미쳤다. 변환본의 정답률이 대조군의 "
-            f"{HOLD_RATIO:.0%} 이하로 떨어지지 않은 모델: {names}"
+            f"프로파일 '{name}'이 기준에 못 미쳤다. 막겠다고 한 경로에서 변환본의 정답률이 "
+            f"대조군의 {HOLD_RATIO:.0%} 이하로 떨어지지 않았다: {scores(broken)}"
         )
         if profile.status != "deprecated":
             warnings.append("이 프로파일은 deprecated로 표시해야 한다.")
-    elif verdicts and not unknown:
-        state = PASSED
-    else:
+    elif unknown or not verdicts:
         state = UNVERIFIED
+    elif left_open:
+        state = PARTIAL
+    else:
+        state = PASSED
+    if left_open:
+        warnings.append(
+            f"프로파일 '{name}'은 다음 경로를 막지 못한다: {scores(left_open)}. "
+            "그 경로로 문서를 읽는 AI에는 효과가 없다."
+        )
     if unknown or not verdicts:
-        names = ", ".join(f"{verdict.model}({verdict.reason})" for verdict in unknown)
+        names = ", ".join(
+            f"{verdict.model} {channel_label(verdict.channel)}({verdict.reason})"
+            for verdict in unknown
+        )
         warnings.append(
             "마지막 검증에서 판정하지 못한 AI 모델이 있다"
             + (f": {names}. " if names else ". ")
@@ -397,8 +439,9 @@ def format_assessment(assessment: Assessment) -> str:
     marks = {True: "막음", False: "못 막음", None: "판정 못 함"}
     for verdict in assessment.models:
         lines.append(
-            f"  - {verdict.model} [{verdict.kind}] 정답률 대조군 {_percent(verdict.control)} → "
-            f"변환본 {_percent(verdict.protected)}  {marks[verdict.held]}"
+            f"  - {verdict.model} [{verdict.kind}] {channel_label(verdict.channel)}: 정답률 대조군 "
+            f"{_percent(verdict.control)} → 변환본 {_percent(verdict.protected)}  "
+            f"{marks[verdict.held]}"
         )
     lines += [f"경고: {warning}" for warning in assessment.warnings]
     return "\n".join(lines)

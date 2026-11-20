@@ -64,9 +64,12 @@ class Refused(Exception):
 class Service:
     """화면이 부르는 기능. HTTP와 떨어져 있어 따로 테스트할 수 있다."""
 
-    def __init__(self, work_dir: Path, reports: Path | None = None) -> None:
+    def __init__(
+        self, work_dir: Path, reports: Path | None = None, records: Path | None = None
+    ) -> None:
         self.work_dir = work_dir
         self.reports = reports or DEFAULT_REPORT_DIR
+        self.records = records or RECORD_DIR
         # 문서 처리는 한 번에 하나만 한다. 연결은 여러 개를 받아도 메모리와 CPU는 하나 몫만 쓴다.
         self.busy = threading.Lock()
 
@@ -74,7 +77,7 @@ class Service:
         try:
             now = datetime.now().astimezone()
             items = load_items()
-            found, source, changed = find_latest(profile, [RECORD_DIR, self.reports], now)
+            found, source, changed = find_latest(profile, [self.records, self.reports], now)
             result = assess(
                 profile,
                 found,
@@ -308,10 +311,12 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
 
 
 def make_server(
-    work_dir: Path, port: int = 0, reports: Path | None = None
+    work_dir: Path, port: int = 0, reports: Path | None = None, records: Path | None = None
 ) -> tuple[ThreadingHTTPServer, str]:
     """서버와 화면 주소를 돌려준다. port가 0이면 빈 포트를 고른다."""
     token = secrets.token_urlsafe(24)
-    server = ThreadingHTTPServer((HOST, port), make_handler(Service(work_dir, reports), token))
+    server = ThreadingHTTPServer(
+        (HOST, port), make_handler(Service(work_dir, reports, records), token)
+    )
     server.daemon_threads = True
     return server, f"http://{HOST}:{server.server_port}/?t={token}"

@@ -1,7 +1,8 @@
 name: a-full
 scenario: A
 status: experimental
-description: 글리프 매핑 교란, 숨은 미끼, 수험번호별 추적 워터마크를 모두 쓴다. --copies와 함께 쓴다.
+description: 글리프 매핑 교란, 숨은 미끼, 수험번호별 추적 워터마크를 모두 쓴다. --copies와 함께 쓴다. 화면 캡처나 파일 올리기로 읽는 AI는 막지 못한다.
+blocks: [text]
 techniques:
   - id: glyph_remap
   - id: decoy

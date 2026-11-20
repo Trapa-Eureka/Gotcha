@@ -1,7 +1,7 @@
 [project]
 name = "examshield"
 version = "0.1.0"
-description = "시험 문서 AI 판독 저항 CLI: 내용은 그대로 둔 복사본을 만들고 저항 효과를 수치로 측정한다"
+description = "시험 문서의 내용은 그대로 둔 채 텍스트 복사로 AI에 넣는 것을 막고 유출을 추적하는 복사본을 만들며, 그 효과를 수치로 측정하는 CLI"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]

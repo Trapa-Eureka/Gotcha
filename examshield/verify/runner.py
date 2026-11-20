@@ -90,9 +90,30 @@ def channels_for(profile: Profile) -> tuple[str, ...]:
     return (IMAGE,) if profile.scenario == "B" else (TEXT, IMAGE, FILE)
 
 
-def estimate_calls(profile: Profile, pages: int, model: ModelClient) -> int:
+def chosen_channels(profile: Profile, only: tuple[str, ...] | None) -> tuple[str, ...]:
+    """프로파일이 재는 경로 가운데 only에 든 것만. only가 없으면 전부."""
+    available = channels_for(profile)
+    if only is None:
+        return available
+    unknown = [channel for channel in only if channel not in (TEXT, IMAGE, FILE)]
+    if unknown:
+        raise ExamShieldError(
+            f"모르는 경로다: {', '.join(unknown)}. text, image, file 중에서 고른다."
+        )
+    picked = tuple(channel for channel in available if channel in only)
+    if not picked:
+        raise ExamShieldError(
+            f"프로파일 '{profile.name}'은 고른 경로를 재지 않는다. "
+            f"이 프로파일이 재는 경로: {', '.join(available)}"
+        )
+    return picked
+
+
+def estimate_calls(
+    profile: Profile, pages: int, model: ModelClient, only: tuple[str, ...] | None = None
+) -> int:
     variants = 2 if profile.techniques else 1
-    used = [channel for channel in channels_for(profile) if channel in model.info.channels]
+    used = [channel for channel in chosen_channels(profile, only) if channel in model.info.channels]
     return pages * variants * len(used)
 
 
@@ -104,6 +125,7 @@ def run_verification(
     now: datetime,
     skipped: list[Skipped] | None = None,
     transform: Transform | None = None,
+    only: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     if isinstance(subject, ItemSet):
         subject = builtin_subject(subject)
@@ -112,6 +134,7 @@ def run_verification(
             f"프로파일 '{profile.name}'에는 교란 기법이 있는데, 이를 적용할 변환 함수가 없다."
         )
     conditions = _capture_conditions(profile)
+    channels = chosen_channels(profile, only)
     variants = {CONTROL: subject.pdf}
     decoys: dict[str, tuple[int, ...] | None] = {CONTROL: None}
     protection: dict[str, Any] | None = None
@@ -131,7 +154,7 @@ def run_verification(
     for model in models:
         rows: list[dict[str, Any]] = []
         try:
-            for channel in channels_for(profile):
+            for channel in channels:
                 if channel not in model.info.channels:
                     continue
                 for variant, inputs in pages.items():
@@ -147,6 +170,12 @@ def run_verification(
         notes.append("변환 없는 프로파일이라 대조군만 측정했다.")
     if subject.custom:
         notes.append("사용자가 준 파일로 측정했다. 정답을 모르므로 정답률은 없다.")
+    limited = channels != channels_for(profile)
+    if limited:
+        notes.append(
+            f"경로를 골라서 쟀다({', '.join(channels)}). 재지 않은 경로가 있어 프로파일의 "
+            "검증 기록으로는 쓰지 않는다."
+        )
     refusals = sum(row["refusals"] for row in results)
     if refusals:
         notes.append(
@@ -168,6 +197,7 @@ def run_verification(
             "item_count": len(subject.truths),
         },
         "simulation": conditions.as_dict() if conditions else None,
+        "channels_limited": limited,
         "protection": protection,
         "models": [
             {

@@ -1,6 +1,7 @@
 name: a-glyph-remap
 scenario: A
 status: experimental
-description: 글꼴의 ToUnicode 매핑을 섞는다. 화면에 보이는 글자는 그대로이고, 추출한 텍스트는 엉뚱한 글자가 된다.
+description: 글꼴의 ToUnicode 매핑을 섞는다. 화면에 보이는 글자는 그대로이고, 복사하거나 추출한 텍스트는 엉뚱한 글자가 된다. 화면 캡처나 파일 올리기로 읽는 AI는 막지 못한다.
+blocks: [text]
 techniques:
   - id: glyph_remap

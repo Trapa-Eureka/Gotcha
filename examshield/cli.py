@@ -81,7 +81,10 @@ from examshield.verify.runner import (
 app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
-    help="시험 문서 AI 판독 저항 CLI. 내용이 같은 복사본을 만들고 저항 효과를 수치로 잰다.",
+    help=(
+        "시험 문서의 내용은 그대로 둔 채, 텍스트를 복사해 AI에 넣는 것을 막고 유출되면 추적할 수 있는 "
+        "복사본을 만든다. 효과는 수치로 잰다."
+    ),
 )
 
 
@@ -205,7 +208,11 @@ def _cloud_models() -> tuple[list[ModelClient], list[Skipped]]:
 
 
 def _confirm_cloud(
-    profile: Profile, subject: Subject, models: list[ModelClient], yes: bool
+    profile: Profile,
+    subject: Subject,
+    models: list[ModelClient],
+    yes: bool,
+    only: tuple[str, ...] | None = None,
 ) -> None:
     pages = len(subject.truths)
     copies = 2 if profile.techniques else 1
@@ -220,7 +227,7 @@ def _confirm_cloud(
     )
     total = 0
     for model in models:
-        calls = estimate_calls(profile, pages, model)
+        calls = estimate_calls(profile, pages, model, only)
         total += calls
         company = get_provider(model.info.provider).company
         typer.echo(f"  대상: {company} ({model.info.name}), 예상 호출 {calls}건")
@@ -254,6 +261,11 @@ def verify(
         "--allow-custom",
         help="내장 문항 세트 대신 이 PDF로 측정한다. 클라우드 모델과 함께 쓰면 파일 내용이 밖으로 나간다.",
     ),
+    channels: str | None = typer.Option(
+        None,
+        "--channels",
+        help="잴 경로를 고른다. text, image, file을 쉼표로 잇는다. 없으면 프로파일이 재는 경로 전부.",
+    ),
     record: bool = typer.Option(
         False,
         "--record",
@@ -267,6 +279,9 @@ def verify(
                 "단일 실행 파일에서는 --record를 쓸 수 없다. 기록할 저장소가 없다. "
                 "리포트는 --out 폴더에 남는다."
             )
+        only = tuple(part.strip() for part in channels.split(",")) if channels else None
+        if record and only is not None:
+            raise ExamShieldError("--record는 --channels와 함께 쓸 수 없다. 경로를 모두 재야 한다.")
         if record and (models is ModelGroup.mock or allow_custom is not None):
             raise ExamShieldError(
                 "--record는 내장 문항 세트를 실제 AI 모델로 잰 결과에만 쓴다. "
@@ -292,7 +307,7 @@ def verify(
         else:
             subject = builtin_subject(load_items())
         if cloud:
-            _confirm_cloud(loaded, subject, cloud, yes)
+            _confirm_cloud(loaded, subject, cloud, yes, only)
         report = run_verification(
             loaded,
             subject,
@@ -301,6 +316,7 @@ def verify(
             skipped=skipped,
             # 워터마크가 든 프로파일은 고정된 가짜 번호의 무늬로 잰다. 무늬가 판독에 주는 영향을 보기 위해서다.
             transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY),
+            only=only,
         )
         path = write_report(report, out)
     except ExamShieldError as error:

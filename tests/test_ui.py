@@ -51,7 +51,9 @@ class Client:
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[Client]:
-    server, address = make_server(tmp_path / "work", reports=tmp_path / "reports")
+    server, address = make_server(
+        tmp_path / "work", reports=tmp_path / "reports", records=tmp_path / "records"
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield Client(address)

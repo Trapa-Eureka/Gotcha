@@ -30,7 +30,10 @@ TECHNIQUES: dict[str, Callable[[bytes, dict[str, Any], Context], Outcome]] = {
 # 수험번호별 키를 받아 복사본마다 다른 무늬를 넣는 기법. 프로파일의 맨 마지막에 하나만 온다.
 KEYED = ("watermark", "dots")
 # 인쇄하면 사라지는 기법(텍스트 레이어, 2% 밝기 차이)은 시나리오 B 프로파일에 넣지 않는다.
-SCENARIO_TECHNIQUES = {"A": ("rasterize", "glyph_remap", "decoy", "watermark"), "B": ("dots",)}
+SCENARIO_TECHNIQUES = {
+    "A": ("rasterize", "glyph_remap", "decoy", "watermark"),
+    "B": ("dots",),
+}
 
 
 @dataclass(frozen=True)
