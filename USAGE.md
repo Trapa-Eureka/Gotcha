@@ -12,6 +12,8 @@
 | 수험번호별 복사본을 만들고 유출본을 추적한다 | [`examshield protect --copies`, `examshield trace`](#수험번호별-복사본과-추적-copies-trace) | 완료 |
 | 인쇄 시험용 복사본을 만들고 사진에서 수험번호를 찾는다 | [`examshield protect --profile b-dots`, `examshield trace`](#인쇄-시험-b-dots) | 구현 (시뮬레이션으로만 확인) |
 | 인쇄물 사진의 촬영 조건을 잰다 | [`examshield calibrate`](#촬영-조건-재기-calibrate) | 구현 (시뮬레이션으로만 확인) |
+| 브라우저 화면에서 복사본을 만들고 검사한다 | [`examshield ui`](#웹-화면-ui) | 구현 |
+| Python 없이 쓰는 실행 파일을 만든다 | [`packaging/build-macos.sh`](#단일-실행-파일-macos) | 구현 (macOS만) |
 | 프로파일 목록과 검증 상태를 본다 | [`examshield profile`](#프로파일-보기-profile) | 완료 |
 
 명령의 원래 설계는 [spec/06-commands.md](spec/06-commands.md)에 있다.
@@ -22,7 +24,7 @@
 uv run examshield protect 시험지.pdf --out out/copies --profile a-remap-decoy
 ```
 
-입력은 PDF 파일, Word(.docx) 파일, 또는 그런 파일이 든 폴더다. 원본은 읽기만 한다. 결과는 `--out` 폴더에 쓴다.
+입력은 PDF 파일, Word(.docx) 파일, 한글(.hwp, .hwpx) 파일, 또는 그런 파일이 든 폴더다. 원본은 읽기만 한다. 결과는 `--out` 폴더에 쓴다.
 
 | 옵션 | 뜻 |
 |---|---|
@@ -60,9 +62,16 @@ uv run examshield protect 시험지.pdf --out out/copies --profile a-remap-decoy
 
 `protect`는 끝에 `check`를 자동으로 한 번 돌린다. 검사가 실패하면 복사본을 쓰지 않고 종료 코드 1로 끝난다.
 
-### Word 입력
+### Word와 한글 입력
 
-`.docx`는 LibreOffice(`soffice`)로 PDF로 바꾼 뒤 처리한다. LibreOffice가 없으면 안내하고 끝낸다. 변환용 임시 폴더는 출력 폴더 안에 만들고 끝나면 지운다. 이 경로는 실제 LibreOffice로 실행해 보지 않았다.
+`.docx`, `.hwp`, `.hwpx`는 LibreOffice(`soffice`)로 PDF로 바꾼 뒤 처리한다. LibreOffice가 없으면 안내하고 끝낸다. 변환용 임시 폴더는 출력 폴더 안에 만들고 끝나면 지운다. 이 경로는 실제 LibreOffice로 실행해 보지 않았다.
+
+한글 문서는 조심해서 쓴다.
+
+- **원본은 한글 파일이 아니라 바뀐 PDF다.** `check`는 LibreOffice가 만든 PDF와 복사본이 같은지를 본다. 그 PDF가 한글에서 본 모양과 같은지는 보지 못한다.
+- **LibreOffice는 한글 문서를 그대로 옮기지 못할 수 있다.** 글꼴, 표, 쪽 나눔이 달라질 수 있고, 버전에 따라 `.hwp`나 `.hwpx`를 열지 못한다. 그래서 한글 입력으로 만들면 "복사본을 열어 확인하라"는 주의가 나온다.
+- **확실한 방법은 한글에서 PDF로 내보내는 것이다.** 그 PDF를 입력으로 주면 변환 단계가 없다.
+- 실제 한글 파일과 실제 LibreOffice로는 실행해 보지 못했다. 흉내 낸 변환기로 흐름만 확인했다.
 
 ## 수험번호별 복사본과 추적 (copies, trace)
 
@@ -316,6 +325,67 @@ uv run examshield report out/reports/verify-none-20261120T140750.json
 저장된 리포트를 `verify`가 끝에 보여준 것과 같은 표로 다시 보여준다. 필수 항목이 없는 파일은 거부하고 종료 코드 2로 끝난다.
 
 교란 기법이 든 프로파일의 리포트면 표 아래에 판정이 붙는다. 판정은 리포트를 지금의 프로파일, 도구 버전, 문항 세트에 비춰 본 것이다.
+
+## 웹 화면 (ui)
+
+```bash
+uv run examshield ui
+```
+
+```
+웹 화면: http://127.0.0.1:52814/?t=SVmSBlmFeFM1EfSBDJly4mKxrkg2ggBC
+이 PC에서만 열린다(127.0.0.1). 주소에 든 토큰이 있어야 쓸 수 있다. 끝내려면 Ctrl+C.
+```
+
+브라우저가 열리고 화면이 뜬다. 화면에서 할 수 있는 일은 세 가지다.
+
+- **복사본 만들기**: 파일 하나를 고르고 프로파일을 골라 만든다. 검사를 통과하면 복사본과 작업 기록(.job.json)을 내려받는다. 통과하지 못하면 복사본을 내주지 않는다.
+- **동일성 검사**: 원본과 복사본을 올려 비교한다. 텍스트 레이어를 바꾸는 프로파일로 만든 복사본은 작업 기록도 함께 올린다.
+- **프로파일 보기**: 이름, 상태, 검증 상태, 경고.
+
+수험번호별 복사본(`--copies`), 추적(`trace`), 측정(`verify`), 촬영 조건 재기(`calibrate`)는 화면에 없다. 명령줄에서 한다.
+
+| 옵션 | 뜻 |
+|---|---|
+| `--port <번호>` | 포트. 기본값 0은 빈 포트를 고른다 |
+| `--no-browser` | 브라우저를 열지 않고 주소만 보여준다 |
+| `--work-dir <폴더>` | Word·한글 파일을 PDF로 바꿀 때 임시 파일을 두는 폴더. 기본값 `out/ui-work`. 끝나면 지운다 |
+
+- **이 PC 밖에서는 열리지 않는다.** 127.0.0.1에만 붙는다. 다른 주소로 여는 옵션은 없다.
+- **주소의 토큰이 열쇠다.** 실행할 때마다 새로 만든다. 토큰 없는 요청, 다른 사이트에서 온 요청, 다른 이름으로 돌려 붙은 요청은 거부한다. 주소를 남에게 주지 않는다.
+- **올린 파일은 메모리에서 처리한다.** PDF는 디스크에 쓰지 않는다. Word와 한글 파일만 변환하는 동안 `--work-dir`에 잠깐 쓴다. 요청 기록도 남기지 않는다.
+- 화면은 바깥의 글꼴이나 스크립트를 부르지 않는다. 네트워크가 끊긴 PC에서도 뜬다.
+- 문서는 한 번에 하나씩 처리한다. 긴 문서를 만드는 동안 다른 요청은 기다린다. 요청 하나는 100MB까지 받는다.
+- 화면이 뜨면 주소창에서 토큰을 지운다. 방문 기록에 남지 않게 하려는 것이다.
+
+## 단일 실행 파일 (macOS)
+
+```bash
+uv sync
+packaging/build-macos.sh
+```
+
+`dist/examshield` 파일 하나가 나온다(약 120MB). Python과 uv가 없는 맥으로 옮겨 그대로 실행한다.
+
+```bash
+./examshield protect 시험지.pdf --out out/copies --profile a-remap-decoy
+./examshield ui
+```
+
+| 들어 있는 것 | 들어 있지 않은 것 |
+|---|---|
+| 모든 명령, 프로파일, 내장 문항 세트, 웹 화면 | Tesseract. 그 PC에 설치돼 있으면 찾아 쓴다. 없으면 OCR 비교를 건너뛴다 |
+| PDF·이미지 처리 라이브러리 | LibreOffice. 없으면 Word와 한글 입력을 거부한다 |
+| | 클라우드 SDK. 실행 파일로는 `verify --models cloud`를 쓸 수 없다 |
+
+Tesseract와 LibreOffice를 넣지 않은 이유는 이렇다. LibreOffice는 수백 MB라 파일이 몇 배로 커진다. Tesseract는 Homebrew가 설치한 라이브러리 여러 개를 함께 옮겨야 하는데, 그 과정이 macOS 버전에 따라 깨지기 쉽다. 둘 다 없어도 PDF를 받아 복사본을 만들고 검사하는 일은 된다.
+
+- `./examshield license`가 라이선스 전문과 소스 코드를 받는 곳을 보여준다. 실행 파일을 남에게 줄 때는 AGPL에 따라 소스를 받을 방법을 함께 알려야 한다.
+- 실행 파일에서는 `verify --record`를 쓸 수 없다. 기록할 저장소가 없기 때문이다.
+- 만든 맥(Apple Silicon)에서만 실행해 봤다. 다른 맥, 인텔 맥, 네트워크가 끊긴 PC에서는 확인하지 못했다.
+- 서명과 공증을 하지 않았다. 다른 맥으로 옮기면 Gatekeeper가 막을 수 있다. 그때는 그 맥에서 `xattr -d com.apple.quarantine examshield`로 격리 표시를 지운다.
+- 실행할 때마다 시스템 임시 폴더에 풀린다. 시작에 약 4초가 걸린다.
+- Windows용은 아직 없다. Windows에서 따로 만들어야 한다.
 
 ## 프로파일 보기 (profile)
 

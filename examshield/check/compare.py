@@ -150,6 +150,10 @@ def compare(
         source, target = open_pdf_bytes(original), open_pdf_bytes(copy)
     except Exception as error:
         raise ExamShieldError("PDF를 열지 못했다. 원본과 복사본이 PDF인지 확인한다.") from error
+    if not (source.is_pdf and target.is_pdf):
+        raise ExamShieldError("PDF가 아닌 파일이 있다. 원본과 복사본이 PDF인지 확인한다.")
+    if source.needs_pass or target.needs_pass:
+        raise ExamShieldError("암호가 걸린 PDF는 비교하지 않는다.")
     dpi = expect.flattened_dpi or CHECK_DPI
     result = CheckResult(
         pages_original=source.page_count, pages_copy=target.page_count, render_dpi=dpi

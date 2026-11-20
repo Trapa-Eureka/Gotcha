@@ -1,7 +1,9 @@
 import glob
 import importlib
 import os
+import sys
 import unicodedata
+import webbrowser
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -13,7 +15,7 @@ from examshield import __version__
 from examshield.auth.keys import delete_key, find_key, setup_help, store_key, usable
 from examshield.benchmark import load_items
 from examshield.check.compare import Expectation, compare, format_result
-from examshield.convert import SUPPORTED_SUFFIXES, read_document
+from examshield.convert import HWP_NOTICE, SUPPORTED_SUFFIXES, needs_review, read_document
 from examshield.errors import ExamShieldError, ModelUnavailableError
 from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
@@ -38,6 +40,7 @@ from examshield.protect.pipeline import (
 from examshield.providers import PROVIDERS, Provider, get_provider
 from examshield.trace.detect import format_trace
 from examshield.trace.detect import trace as trace_document
+from examshield.ui.server import make_server
 from examshield.verify.calibrate import (
     decode_photo,
     format_comparison,
@@ -259,6 +262,11 @@ def verify(
 ) -> None:
     try:
         loaded = load_profile(profile)
+        if record and getattr(sys, "frozen", False):
+            raise ExamShieldError(
+                "단일 실행 파일에서는 --record를 쓸 수 없다. 기록할 저장소가 없다. "
+                "리포트는 --out 폴더에 남는다."
+            )
         if record and (models is ModelGroup.mock or allow_custom is not None):
             raise ExamShieldError(
                 "--record는 내장 문항 세트를 실제 AI 모델로 잰 결과에만 쓴다. "
@@ -425,10 +433,13 @@ def _inputs(source: Path) -> list[Path]:
             if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
         )
         if not found:
-            raise ExamShieldError(f"폴더에 PDF나 .docx 파일이 없다: {source}")
-        stems = [path.stem for path in found]
+            raise ExamShieldError(f"폴더에 PDF, .docx, .hwp, .hwpx 파일이 없다: {source}")
+        # 대소문자나 유니코드 표기만 다른 이름도 겹친 것으로 본다. 결과 파일이 서로 덮어쓴다.
+        stems = [unicodedata.normalize("NFC", path.stem).casefold() for path in found]
         if len(set(stems)) != len(stems):
-            raise ExamShieldError("이름이 같은 PDF와 .docx가 함께 있다. 결과 파일 이름이 겹친다.")
+            raise ExamShieldError(
+                "확장자만 다르고 이름이 같은 파일이 함께 있다. 결과 파일 이름이 겹친다."
+            )
         return found
     if source.is_file():
         return [source]
@@ -437,7 +448,9 @@ def _inputs(source: Path) -> list[Path]:
 
 @app.command(help="시험 문서의 복사본을 만들고, 원본과 내용이 같은지 바로 검사한다.")
 def protect(
-    source: Path = typer.Argument(..., metavar="입력", help="PDF 또는 .docx 파일, 또는 폴더"),
+    source: Path = typer.Argument(
+        ..., metavar="입력", help="PDF, .docx, .hwp, .hwpx 파일, 또는 폴더"
+    ),
     out: Path = typer.Option(..., "--out", help="복사본을 쓸 폴더. 원본이 있는 폴더는 안 된다."),
     profile: str = typer.Option(..., "--profile", help="프로파일 이름. 예: a-glyph-remap"),
     seed_file: Path | None = typer.Option(
@@ -502,10 +515,19 @@ def protect(
             )
             for note in result.notes:
                 typer.echo(f"  참고: {note}")
+            if needs_review(path):
+                typer.echo(f"  주의: {HWP_NOTICE}")
     except ExamShieldError as error:
         raise _fail(error) from error
     except OSError as error:
         raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    except typer.Exit:
+        raise
+    except Exception as error:
+        # 깨진 PDF를 PDF 라이브러리가 처리하다 낸 오류. 내용은 내보내지 않는다.
+        raise _fail(
+            ExamShieldError(f"파일을 처리하지 못했다. 깨진 파일일 수 있다({type(error).__name__}).")
+        ) from error
     finally:
         # 경고는 결과를 막지 않는다. 복사본은 시각과 무관하게 같은 바이트로 나온다.
         if loaded is not None:
@@ -603,6 +625,8 @@ def _protect_copies(
         rows.append(map_row(copy, seed, written.name))
     write_map(table, rows)
     typer.echo(f"{source.name} → {out}  복사본 {len(rows)}개, 모두 검사 통과")
+    if needs_review(source):
+        typer.echo(f"주의: {HWP_NOTICE}")
     typer.echo(
         f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개). 목록의 제목 줄이 번호로 읽히지 않았는지 확인한다."
     )
@@ -615,7 +639,7 @@ def _protect_copies(
 )
 def trace(
     leaked: Path = typer.Argument(..., metavar="유출본", help="PDF 또는 그림 파일(png, jpg 등)"),
-    original: Path = typer.Option(..., "--original", help="변환 전 원본 PDF 또는 .docx"),
+    original: Path = typer.Option(..., "--original", help="변환 전 원본(PDF, .docx, .hwp, .hwpx)"),
     map_file: Path = typer.Option(..., "--map-file", help="protect --copies가 쓴 매핑표"),
     seed_file: Path = typer.Option(..., "--seed-file", help="protect --copies에 쓴 시드 파일"),
 ) -> None:
@@ -634,6 +658,13 @@ def trace(
         raise _fail(error) from error
     except OSError as error:
         raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    except typer.Exit:
+        raise
+    except Exception as error:
+        # 깨진 PDF를 PDF 라이브러리가 처리하다 낸 오류. 내용은 내보내지 않는다.
+        raise _fail(
+            ExamShieldError(f"파일을 처리하지 못했다. 깨진 파일일 수 있다({type(error).__name__}).")
+        ) from error
     typer.echo(format_trace(result))
     if not result.found:
         raise typer.Exit(1)
@@ -684,9 +715,59 @@ def calibrate(
         typer.echo("참고: Tesseract가 없어 OCR 판독률은 재지 않았다.")
 
 
+@app.command(help="이 PC에서만 열리는 웹 화면을 띄운다. 복사본 만들기와 동일성 검사를 할 수 있다.")
+def ui(
+    port: int = typer.Option(0, "--port", min=0, max=65535, help="포트. 0이면 빈 포트를 고른다."),
+    no_browser: bool = typer.Option(
+        False, "--no-browser", help="브라우저를 열지 않고 주소만 보여준다."
+    ),
+    work_dir: Path = typer.Option(
+        Path("out/ui-work"),
+        "--work-dir",
+        help="Word·한글 파일을 PDF로 바꿀 때 임시 파일을 두는 폴더. 끝나면 지운다.",
+    ),
+) -> None:
+    try:
+        server, address = make_server(work_dir, port)
+    except OSError as error:
+        raise _fail(ExamShieldError(f"웹 화면을 띄우지 못했다: {error}")) from error
+    typer.echo(f"웹 화면: {address}")
+    typer.echo(
+        "이 PC에서만 열린다(127.0.0.1). 주소에 든 토큰이 있어야 쓸 수 있다. 끝내려면 Ctrl+C."
+    )
+    if not no_browser:
+        webbrowser.open(address)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        typer.echo("\n끝냈다.")
+    finally:
+        server.server_close()
+
+
+@app.command("license", help="라이선스와 소스 코드를 받는 곳을 보여준다.")
+def show_license() -> None:
+    typer.echo(f"examshield {__version__}")
+    typer.echo("GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)")
+    typer.echo(
+        "이 프로그램은 자유 소프트웨어다. 보증은 없다. 고쳐서 배포하거나 네트워크로 서비스하면"
+    )
+    typer.echo("고친 소스를 같은 조건으로 공개해야 한다.")
+    typer.echo("소스 코드: https://github.com/Trapa-Eureka/Gotcha")
+    typer.echo(
+        "PDF 처리에 PyMuPDF(AGPL-3.0, Artifex Software)를 쓴다: https://github.com/pymupdf/PyMuPDF"
+    )
+    bundled = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "LICENSE"
+    if bundled.is_file():
+        typer.echo(f"라이선스 전문: {bundled}")
+        if getattr(sys, "frozen", False):
+            typer.echo("")
+            typer.echo(bundled.read_text(encoding="utf-8"))
+
+
 @app.command(help="원본과 복사본의 내용이 같은지 검사한다. 다르면 종료 코드 1.")
 def check(
-    original: Path = typer.Argument(..., metavar="원본", help="원본 PDF 또는 .docx"),
+    original: Path = typer.Argument(..., metavar="원본", help="원본(PDF, .docx, .hwp, .hwpx)"),
     copy: Path = typer.Argument(..., metavar="복사본", help="protect가 만든 PDF"),
     job: Path | None = typer.Option(
         None, "--job", help="작업 기록(.job.json). 없으면 복사본 옆의 같은 이름 파일을 찾는다."
@@ -708,6 +789,13 @@ def check(
         raise _fail(error) from error
     except OSError as error:
         raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    except typer.Exit:
+        raise
+    except Exception as error:
+        # 깨진 PDF를 PDF 라이브러리가 처리하다 낸 오류. 내용은 내보내지 않는다.
+        raise _fail(
+            ExamShieldError(f"파일을 처리하지 못했다. 깨진 파일일 수 있다({type(error).__name__}).")
+        ) from error
     typer.echo(format_result(result))
     if not result.passed:
         raise typer.Exit(1)

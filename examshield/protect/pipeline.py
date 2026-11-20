@@ -76,6 +76,8 @@ def protect_bytes(
         source = open_pdf_bytes(pdf)
     except Exception as error:
         raise ExamShieldError("PDF를 열지 못했다.") from error
+    if not source.is_pdf:
+        raise ExamShieldError("PDF가 아니다. 확장자만 .pdf인 다른 형식의 파일일 수 있다.")
     if source.needs_pass or source.is_encrypted:
         raise ExamShieldError("암호가 걸린 PDF는 처리하지 않는다.")
     if source.page_count == 0:
@@ -189,13 +191,21 @@ def append_log(out_dir: Path, protected: Protected, passed: bool, now: datetime)
 
 def load_expectation(job_file: Path, copy: bytes) -> Expectation:
     try:
-        record: dict[str, Any] = json.loads(job_file.read_text(encoding="utf-8"))
+        text = job_file.read_text(encoding="utf-8")
+    except (OSError, ValueError) as error:
+        raise ExamShieldError(f"작업 기록을 읽지 못했다: {job_file}") from error
+    return expectation_from_text(text, copy, str(job_file))
+
+
+def expectation_from_text(text: str, copy: bytes, label: str) -> Expectation:
+    try:
+        record: dict[str, Any] = json.loads(text)
         expect = Expectation.from_dict(dict(record["expect"]))
         recorded = str(record["output_sha256"])
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        raise ExamShieldError(f"작업 기록을 읽지 못했다: {job_file}") from error
+    except (ValueError, KeyError, TypeError, RecursionError) as error:
+        raise ExamShieldError(f"작업 기록을 읽지 못했다: {label}") from error
     if recorded != sha256_hex(copy):
         raise ExamShieldError(
-            f"작업 기록({job_file.name})이 이 복사본의 것이 아니다. 해시가 다르다."
+            f"작업 기록({Path(label).name})이 이 복사본의 것이 아니다. 해시가 다르다."
         )
     return expect

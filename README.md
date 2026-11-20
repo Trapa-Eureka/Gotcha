@@ -1,9 +1,9 @@
 # Gotcha (잡았다 요놈) — examshield
 
-로컬에 있는 시험 문서(PDF, Word)를 내용은 그대로 둔 채 AI가 읽고 풀기 어렵게 재가공한 복사본으로 만들고, 그 효과를 날짜와 모델 버전이 찍힌 수치로 증명하는 오프라인 CLI.
+로컬에 있는 시험 문서(PDF, Word, 한글)를 내용은 그대로 둔 채 AI가 읽고 풀기 어렵게 재가공한 복사본으로 만들고, 그 효과를 날짜와 모델 버전이 찍힌 수치로 증명하는 오프라인 CLI.
 
-> **상태: 초기 개발 (Phase 6 구현, 실제 인쇄·촬영 실험은 남음).**
-> 복사본을 만드는 `protect`, 내용이 같은지 검사하는 `check`, 효과를 재는 `verify`와 `report`, 유출본의 수험번호를 찾는 `trace`, 프로파일과 검증 상태를 보여주는 `profile`, 인쇄물 사진의 촬영 조건을 재는 `calibrate`가 동작한다. 클라우드 모델(OpenAI, Anthropic, Google) 연결도 들어 있지만 실제 키로 호출해 본 적은 없다. 실제 AI 모델로 잰 점수는 아직 없고, 지금 있는 수치는 텍스트 추출과 OCR 기준선뿐이다.
+> **상태: 초기 개발 (Phase 7까지 구현. 실제 AI, 실제 인쇄·촬영, 폐쇄망 PC로 확인하는 일이 남음).**
+> 복사본을 만드는 `protect`, 내용이 같은지 검사하는 `check`, 효과를 재는 `verify`와 `report`, 유출본의 수험번호를 찾는 `trace`, 프로파일과 검증 상태를 보여주는 `profile`, 인쇄물 사진의 촬영 조건을 재는 `calibrate`, 이 PC에서만 열리는 웹 화면 `ui`가 동작한다. 클라우드 모델(OpenAI, Anthropic, Google) 연결도 들어 있지만 실제 키로 호출해 본 적은 없다. 실제 AI 모델로 잰 점수는 아직 없고, 지금 있는 수치는 텍스트 추출과 OCR 기준선뿐이다.
 > Phase 1~5와 인쇄 시험용 Phase 6을 만들었다. 실제 AI 모델로 검증한 프로파일이 아직 없어서 `protect`는 모든 `a-`, `b-` 프로파일에 경고를 낸다. 인쇄 시험 기능은 시뮬레이션으로만 확인했고 실제로 인쇄해서 찍어 본 적은 없다.
 
 **바로 가기:** [빠른 시작](#빠른-시작) · [**사용법**](USAGE.md) · [설치](#설치) · [로드맵](#로드맵) · [명세](spec/README.md) · [English](README.en.md)
@@ -42,7 +42,10 @@
 | 수험번호별 추적 워터마크, `--copies`, `examshield trace` | 완료 (PDF와 화면 캡처 수준 그림에서 복원. 실제 화면 캡처가 아니라 PDF를 그림으로 바꾼 것으로 확인) |
 | 모델 드리프트 경고(검증이 없거나 30일 넘었거나 기준 미달이면 `protect`가 경고), `examshield profile list\|show` | 완료 (실제 AI로 잰 검증 기록은 아직 없음) |
 | 시나리오 B(인쇄 시험): 점 무늬 프로파일 `b-dots`, 인쇄물을 찍은 사진에서 수험번호 복원, `examshield calibrate` | 구현 (촬영 시뮬레이션으로만 확인. 실제 인쇄·촬영으로는 확인하지 못함. 문항별 의미 미끼는 만들지 않음) |
-| 폐쇄망용 단일 실행 파일, 상용 라이선스, 검증된 프로파일 구독 | 계획중 (Phase 7) |
+| 폐쇄망용 단일 실행 파일 (macOS) | 구현 (만든 맥에서 실행 확인. 다른 맥이나 네트워크가 끊긴 PC에서는 확인하지 못함. Windows용은 아직 없음) |
+| 로컬 웹 화면 `examshield ui` — 복사본 만들기, 동일성 검사, 프로파일 보기 | 구현 (127.0.0.1에서만 열림) |
+| 한글(.hwp, .hwpx) 입력 | 구현 (LibreOffice 없이 흉내 낸 변환기로만 테스트. 실제 한글 파일로는 확인하지 못함) |
+| 라이선스 | AGPL-3.0-or-later 적용. 프로파일 구독은 유료화하지 않는다 |
 
 ### 동작 방식
 
@@ -60,7 +63,7 @@
 - Python **3.11 이상** (개발은 3.12)
 - [uv](https://docs.astral.sh/uv/)
 - Git
-- 선택: [Tesseract](https://github.com/tesseract-ocr/tesseract)와 `kor`, `eng` 데이터 (OCR 기준선), [Ollama](https://ollama.com)와 비전 모델 (로컬 모델 측정), LibreOffice (Word 입력)
+- 선택: [Tesseract](https://github.com/tesseract-ocr/tesseract)와 `kor`, `eng` 데이터 (OCR 기준선), [Ollama](https://ollama.com)와 비전 모델 (로컬 모델 측정), LibreOffice (Word, 한글 입력)
 
 ## 설치
 
@@ -77,6 +80,15 @@ PyPI에는 아직 올리지 않았다. 올리면 다음처럼 설치할 수 있�
 ```bash
 uv tool install examshield
 ```
+
+Python과 uv가 없는 PC에서 쓰려면 실행 파일 하나로 만든다. macOS에서만 된다.
+
+```bash
+uv sync
+packaging/build-macos.sh    # dist/examshield (약 120MB)
+```
+
+만든 파일을 다른 맥으로 옮겨 그대로 실행한다. Tesseract와 LibreOffice는 들어 있지 않다. 그 PC에 따로 설치돼 있으면 찾아 쓰고, 없어도 PDF 처리는 된다.
 
 ## 빠른 시작
 
@@ -132,7 +144,7 @@ git config core.hooksPath .githooks
 - 글리프 매핑 변조는 PDF의 ToUnicode 표만 바꾼다. 글꼴 파일 안의 글자표를 직접 읽는 추출기는 원문을 복원할 수 있다. MuPDF와 poppler(`pdftotext`)로만 확인했다.
 - 숨은 미끼는 정답을 모르고 무작위로 고른 번호를 가리킨다. 우연히 정답을 가리킬 수 있다. 실제 AI가 미끼를 따르는지는 재지 않았다.
 - `check`의 렌더링 비교는 MuPDF 한 가지로 한다. 다른 PDF 뷰어에서 다르게 보이는 경우는 잡지 못한다. 이미지화한 복사본은 그 해상도(기본 200dpi)에서 원본과 같다는 뜻이고, 더 확대하면 원본보다 흐리다.
-- Word(.docx) 입력은 LibreOffice가 없는 PC에서 흉내 낸 변환기로만 테스트했다. LibreOffice가 같은 파일을 매번 같은 PDF로 바꾸는지, 변환 중 네트워크를 쓰지 않는지는 확인하지 못했다.
+- Word(.docx)와 한글(.hwp, .hwpx) 입력은 LibreOffice가 없는 PC에서 흉내 낸 변환기로만 테스트했다. LibreOffice가 같은 파일을 매번 같은 PDF로 바꾸는지, 변환 중 네트워크를 쓰지 않는지는 확인하지 못했다.
 - 화면용 추적 워터마크(`a-watermark`, `a-full`)는 옅은 바탕 무늬다. 화면 캡처, 확대·축소, 일부만 자르기, JPEG 저장에는 남지만, 밝기를 올려 바탕을 하얗게 날리면 지워진다. 그 경우 `trace`는 아무도 지목하지 않는다. 여러 복사본을 겹쳐 평균 내는 공격, 글자를 새로 타이핑하는 유출도 막지 못한다.
 - `trace`는 변환 전 원본, 매핑표, 시드 파일이 모두 있어야 한다. 종이를 찍은 사진은 점 무늬(`b-dots`) 복사본만 다룬다. 화면용 워터마크는 인쇄하면 사라진다.
 - 워터마크 복원은 PDF를 MuPDF와 poppler로 그림으로 바꾼 것(해상도 72~220dpi, 일부 자르기, JPEG 품질 60 이상)으로 확인했다. 실제 화면 캡처 도구나 메신저가 다시 압축한 그림으로는 확인하지 못했다.
@@ -157,11 +169,15 @@ git config core.hooksPath .githooks
 - 프로파일의 검증 기록이 하나도 없다. 실제 AI 모델로 `verify`를 돌린 적이 없기 때문이다. 그래서 드리프트 경고는 만든 리포트로만 테스트했다.
 - 드리프트 판정 기준(AI 모델마다 가장 잘 풀린 경로에서 변환본 정답률이 대조군의 절반 이하)과 30일은 명세에 숫자가 없어 임의로 정한 값이다. 문항이 12개라 한두 문항 차이로 판정이 바뀔 수 있다.
 - 기준에 못 미친 프로파일을 `deprecated`로 바꾸는 일은 자동이 아니다. `protect`가 바꿔야 한다고 경고하고, 사람이 프로파일 YAML을 고친다.
+- 한글 문서는 LibreOffice가 PDF로 바꾼 결과를 원본으로 삼는다. LibreOffice는 한글 문서의 글꼴, 표, 쪽 나눔을 그대로 옮기지 못할 수 있고, 버전에 따라 열지 못한다. `check`가 보장하는 것은 "바뀐 PDF와 복사본이 같다"까지다. 한글에서 본 모양과 같은지는 사람이 확인해야 한다. 확실한 방법은 한글에서 PDF로 내보낸 파일을 쓰는 것이다.
+- 단일 실행 파일은 만든 맥(Apple Silicon)에서만 실행해 봤다. 다른 맥, 인텔 맥, 네트워크가 끊긴 PC에서는 확인하지 못했다. 서명과 공증을 하지 않아 다른 맥에서는 Gatekeeper가 막을 수 있다. 실행할 때마다 시스템 임시 폴더에 풀리고 시작에 약 4초가 걸린다. Windows용은 아직 없다.
+- 실행 파일에는 Tesseract와 LibreOffice를 넣지 않았다. LibreOffice는 수백 MB이고, Tesseract는 Homebrew 라이브러리를 옮겨 묶는 과정이 깨지기 쉽다. 없으면 OCR 비교를 건너뛰고(그 사실을 적는다), Word와 한글 입력은 거부한다. 클라우드 SDK도 넣지 않아서 실행 파일로는 클라우드 모델 검증을 할 수 없다.
+- 웹 화면은 복사본 만들기(파일 하나), 동일성 검사, 프로파일 보기만 한다. 수험번호별 복사본, 추적, 측정은 명령줄에서 한다. 크롬 한 가지로 화면이 뜨는 것만 확인했다. 올린 파일은 메모리에서 처리하고(파일 하나에 100MB까지) 문서는 한 번에 하나씩 처리한다.
 - 안전 훅은 명령 문자열을 대조하는 안전망이다. 감싸거나 돌려 쓴 명령은 빠져나갈 수 있다.
 
-## 유료 플랜 (계획중)
+## 요금
 
-인쇄 시험용 기능(Phase 6)의 코드는 이 저장소에 공개돼 있다. 기관이 시험을 운영할 때 필요한 것(폐쇄망 설치본, 상용 라이선스, 검증된 프로파일 구독)은 유료 플랜으로 계획중이다. 판매하는 것은 아직 없고, 가격과 세부 사항은 정해지지 않았다.
+판매하는 것은 없다. 모든 기능의 코드가 이 저장소에 AGPL로 공개돼 있다. 프로파일 구독은 유료화하지 않기로 했다. 프로파일과 검증 기록은 저장소에 함께 둔다.
 
 ## 안전 훅
 
@@ -193,10 +209,13 @@ Gotcha/
 │   ├── profiles/      # 프로파일 YAML: none, none-print, a-*, b-*. verified/에 최신 검증 기록
 │   ├── verify/        # runner, capture_sim, calibrate, metrics, report, drift, models/
 │   ├── auth/          # keys: 환경변수와 OS 키체인에서 API 키 찾기
+│   ├── ui/            # server, page.html: 이 PC에서만 열리는 웹 화면
+│   ├── convert.py     # Word, 한글 파일을 LibreOffice로 PDF로 바꾼다
 │   ├── providers.py   # 클라우드 제공사 목록: 키 이름, 기본 모델, 접속 주소
 │   ├── netguard.py    # 오프라인 설정일 때 네트워크 거부
 │   └── pdfio.py       # PDF 읽기, 렌더링, 결정적 저장
 ├── tests/
+├── packaging/         # build-macos.sh: 단일 실행 파일 만들기
 ├── spec/              # 작업 명세서 (원본을 절 단위로 나눔)
 ├── .claude/
 │   ├── settings.json  # 거부 규칙, 훅 등록
@@ -206,10 +225,11 @@ Gotcha/
 ├── .githooks/         # pre-push: 푸시 전에 ruff, mypy, pytest
 ├── CLAUDE.md          # AI 에이전트용 짧은 안내
 ├── USAGE.md           # 사용법
+├── LICENSE            # AGPL-3.0
 └── pyproject.toml
 ```
 
-`docs/`는 git에서 제외된 폴더로, 유료 플랜 메모만 둔다.
+`docs/`는 git에서 제외된 폴더로, 사업 관련 메모만 둔다.
 
 ## 로드맵
 
@@ -222,7 +242,7 @@ Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간�
 - [x] **Phase 4** — 추적 워터마크, `--copies`, `trace`. 완료 기준: PDF와 화면 캡처 수준 이미지에서 수험번호 복원
 - [x] **Phase 5** — 모델 드리프트 경고, `report`, `profile`, 문서 마무리. 완료 기준: 전체 테스트 통과
 - [ ] **Phase 6** — 시나리오 B 인쇄용 프로파일, 실제 인쇄·촬영 보정, 촬영 사진에서 워터마크 복원. 코드는 구현했다. 완료 기준인 "시뮬레이션과 실촬영 결과 비교"는 실제로 인쇄해서 찍은 사진이 있어야 해서 남아 있다
-- [ ] **Phase 7** — 폐쇄망용 단일 실행 파일, 상용 라이선스, 프로파일 구독, 웹 UI, HWP 입력 (계획중)
+- [ ] **Phase 7** — 폐쇄망용 단일 실행 파일, 라이선스, 웹 UI, 한글 입력. 코드는 구현했다(실행 파일은 macOS만). 완료 기준인 "폐쇄망 PC에서 설치·실행"은 그런 PC에서 해 봐야 해서 남아 있다. Windows용 실행 파일도 남아 있다. 프로파일 구독은 유료화하지 않기로 해서 만들지 않는다
 
 명세의 단계별 계획([spec/11-plan.md](spec/11-plan.md))과의 대응: 명세 1~4단계가 Phase 1~4, 명세 5단계가 Phase 6, 명세 6단계가 Phase 7이다. `examshield trace`와 `examshield calibrate`는 명세의 명령 목록에 없다. 워터마크 복원과 실촬영 비교에 필요해서 추가한다.
 
@@ -239,6 +259,8 @@ Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간�
 | 로컬 모델 | Ollama |
 | 클라우드 모델 | 각 사 공식 Python SDK (선택 설치 `examshield[cloud]`) |
 | 키 저장 | keyring |
+| 웹 화면 | 표준 라이브러리 `http.server`, 외부 자원을 부르지 않는 HTML 한 장 |
+| 단일 실행 파일 | PyInstaller |
 | 품질 | pytest, hypothesis, ruff, mypy strict, git pre-push 훅 |
 
 ## 기여
@@ -247,4 +269,6 @@ Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간�
 
 ## 라이선스
 
-정하지 않았다. PyMuPDF가 AGPL이라 그와 맞물려 결정해야 한다 ([spec/13-open-decisions.md](spec/13-open-decisions.md)). 정해지기 전까지는 재배포 조건이 없는 상태다.
+[GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). PDF 처리에 쓰는 PyMuPDF가 AGPL이라, 이 도구를 배포하려면 어차피 AGPL 조건을 따라야 한다. 그래서 같은 라이선스로 맞췄다. 고쳐서 배포하거나 네트워크로 서비스하면 고친 소스를 같은 조건으로 공개해야 한다.
+
+소스를 공개하지 않는 조건으로 쓰려면 이 저장소의 저작권자에게서 별도 허락을 받아야 하고, PyMuPDF도 Artifex의 상용 라이선스를 따로 사야 한다. 그런 상용 라이선스는 지금 팔지 않는다. 이 문단은 법률 자문이 아니다.

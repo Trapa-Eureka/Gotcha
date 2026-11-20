@@ -1,9 +1,9 @@
 # Gotcha — examshield
 
-An offline CLI that turns an exam document on your machine (PDF, Word) into a copy with the same content that is harder for AI to read and solve, and proves the effect with numbers stamped with a date and model versions.
+An offline CLI that turns an exam document on your machine (PDF, Word, Hangul HWP) into a copy with the same content that is harder for AI to read and solve, and proves the effect with numbers stamped with a date and model versions.
 
-> **Status: early development (Phase 6 implemented; the real print-and-photograph experiment is still open).**
-> `protect` (makes the copies), `check` (checks the content is the same), `verify` and `report` (measure the effect) `trace` (finds whose copy leaked) `profile` (lists profiles and their verification state) and `calibrate` (measures the capture conditions of a photo of a printed page) work. Cloud model clients (OpenAI, Anthropic, Google) are included but have never been called with a real key. There are no scores from a real AI model yet; the only numbers so far are the text-extraction and OCR baselines.
+> **Status: early development (implemented through Phase 7; checks against real AI, real printing and photographing, and an air-gapped PC are still open).**
+> `protect` (makes the copies), `check` (checks the content is the same), `verify` and `report` (measure the effect) `trace` (finds whose copy leaked) `profile` (lists profiles and their verification state) `calibrate` (measures the capture conditions of a photo of a printed page) and `ui` (a web page that opens on this machine only) work. Cloud model clients (OpenAI, Anthropic, Google) are included but have never been called with a real key. There are no scores from a real AI model yet; the only numbers so far are the text-extraction and OCR baselines.
 > Phases 1 to 5 and Phase 6 (printed exams) are built. No profile has been verified against a real AI model yet, so `protect` prints a warning for every `a-` and `b-` profile. The printed-exam features were checked with the simulation only; nothing was actually printed and photographed.
 
 **Jump to:** [Quick start](#quick-start) · [**Usage**](USAGE.md) · [Installation](#installation) · [Roadmap](#roadmap) · [Spec](spec/README.md) · [한국어](README.md)
@@ -44,7 +44,10 @@ It is for teachers, exam writers and assessment bodies who hand out online exams
 | Tracking watermark per examinee, `--copies`, `examshield trace` | Done (recovered from PDFs and screenshot-quality pictures; checked with PDFs rendered to pictures, not real screen captures) |
 | Model drift warnings (`protect` warns when verification is missing, older than 30 days or below the bar), `examshield profile list\|show` | Done (no verification record from a real AI yet) |
 | Scenario B (printed exams): dot-pattern profile `b-dots`, examinee number recovery from a photo of the printed page, `examshield calibrate` | Implemented (checked with the capture simulation only, never with real printing and photographing; per-item semantic decoys are not built) |
-| Single executable for air-gapped networks, commercial license, verified profile subscription | Planned (Phase 7) |
+| Single executable for air-gapped networks (macOS) | Implemented (run on the Mac that built it; not checked on another Mac or on a machine without network; no Windows build yet) |
+| Local web page `examshield ui` — make a copy, check sameness, list profiles | Implemented (listens on 127.0.0.1 only) |
+| Hangul (.hwp, .hwpx) input | Implemented (tested only with a stand-in converter, without LibreOffice; never checked with a real Hangul file) |
+| License | AGPL-3.0-or-later applied. The profile subscription will not be a paid product |
 
 ### How it works
 
@@ -62,7 +65,7 @@ All security requirements are in [spec/05-security.md](spec/05-security.md).
 - Python **3.11 or newer** (developed on 3.12)
 - [uv](https://docs.astral.sh/uv/)
 - Git
-- Optional: [Tesseract](https://github.com/tesseract-ocr/tesseract) with `kor` and `eng` data (OCR baseline), [Ollama](https://ollama.com) with a vision model (local model measurement), LibreOffice (Word input)
+- Optional: [Tesseract](https://github.com/tesseract-ocr/tesseract) with `kor` and `eng` data (OCR baseline), [Ollama](https://ollama.com) with a vision model (local model measurement), LibreOffice (Word and Hangul input)
 
 ## Installation
 
@@ -79,6 +82,15 @@ The package is not on PyPI yet. Once it is, the plan is to make this work:
 ```bash
 uv tool install examshield
 ```
+
+For a machine without Python and uv, build a single executable. This works on macOS only.
+
+```bash
+uv sync
+packaging/build-macos.sh    # dist/examshield (about 120 MB)
+```
+
+Copy the file to another Mac and run it as is. Tesseract and LibreOffice are not inside. If that machine has them installed they are found and used; without them PDF processing still works.
 
 ## Quick start
 
@@ -134,7 +146,7 @@ After that, ruff, mypy and pytest run right before `git push`, and the push is b
 - Glyph mapping scrambling changes only the PDF's ToUnicode table. An extractor that reads the character table inside the font file can recover the original text. Only MuPDF and poppler (`pdftotext`) were checked.
 - A hidden decoy points at a randomly chosen number, without knowing the right answer. It can point at the right answer by chance. Whether a real AI follows the decoy has not been measured.
 - The rendering comparison in `check` uses MuPDF only. It cannot catch a case that looks different in another PDF viewer. A rasterized copy equals the original at its own resolution (200 dpi by default) and is blurrier than the original when zoomed further.
-- Word (.docx) input was tested only with a stand-in converter on a machine without LibreOffice. Whether LibreOffice turns the same file into the same PDF every time, and whether it stays off the network while converting, was not confirmed.
+- Word (.docx) and Hangul (.hwp, .hwpx) input were tested only with a stand-in converter on a machine without LibreOffice. Whether LibreOffice turns the same file into the same PDF every time, and whether it stays off the network while converting, was not confirmed.
 - The on-screen tracking watermark (`a-watermark`, `a-full`) is a faint background pattern. It survives screenshots, scaling, cropping and JPEG saving, but it is erased if brightness is raised until the background turns pure white. In that case `trace` names nobody. It also does not stop averaging several copies together, or a leak that retypes the text.
 - `trace` needs the untransformed original, the mapping table and the seed file. Photos of paper are handled only for dot-pattern (`b-dots`) copies. The on-screen watermark disappears in print.
 - Watermark recovery was checked with PDFs turned into pictures by MuPDF and poppler (72 to 220 dpi, partial crops, JPEG quality 60 and above). It was not checked with a real screen-capture tool or with pictures recompressed by a messenger.
@@ -159,11 +171,15 @@ After that, ruff, mypy and pytest run right before `git push`, and the push is b
 - No profile has a verification record. `verify` has never been run against a real AI model. The drift warnings were therefore tested only with hand-made reports.
 - The drift bar (for each AI model, on the path it solved best, accuracy on the protected copy at most half of the control) and the 30 days are values chosen here; the spec gives no numbers. With 12 items, one or two answers can flip the verdict.
 - Marking a profile that fell below the bar as `deprecated` is not automatic. `protect` warns that it should be changed, and a person edits the profile YAML.
+- For a Hangul document, the PDF that LibreOffice produces is taken as the original. LibreOffice may not carry over fonts, tables and page breaks faithfully, and some versions cannot open the file at all. `check` guarantees only that the converted PDF and the copy are the same. Whether it looks like what Hangul shows has to be checked by a person. The safe route is a PDF exported from Hangul itself.
+- The single executable was run only on the Mac that built it (Apple Silicon). It was not checked on another Mac, an Intel Mac or a machine without network. It is not signed or notarized, so Gatekeeper may block it on another Mac. It unpacks into the system temp folder on every start and takes about 4 seconds to start. There is no Windows build yet.
+- Tesseract and LibreOffice are not in the executable. LibreOffice is several hundred MB, and bundling Tesseract means relocating Homebrew libraries, which breaks easily. Without them the OCR comparison is skipped (and that is stated), and Word and Hangul input are refused. The cloud SDKs are left out too, so the executable cannot verify against cloud models.
+- The web page only makes a copy (one file), checks sameness and lists profiles. Per-examinee copies, tracing and measuring are done on the command line. Only Chrome was used to confirm the page opens. Uploads are handled in memory (up to 100 MB per request), one document at a time.
 - The safety hooks are a safety net that matches command text. A wrapped or indirect command can slip past them.
 
-## Paid plans (planned)
+## Pricing
 
-The code for the printed-exam features (Phase 6) is public in this repository. What an institution needs to run exams (an air-gapped installer, a commercial license, a subscription to verified profiles) is planned as paid plans. Nothing is for sale yet, and prices and details are not decided.
+Nothing is for sale. The code for every feature is public in this repository under the AGPL. The profile subscription will not be a paid product. Profiles and their verification records live in the repository.
 
 ## Safety hooks
 
@@ -195,10 +211,13 @@ Gotcha/
 │   ├── profiles/      # profile YAML: none, none-print, a-*, b-*. verified/ holds the latest verification records
 │   ├── verify/        # runner, capture_sim, calibrate, metrics, report, drift, models/
 │   ├── auth/          # keys: finds API keys in environment variables and the OS keychain
+│   ├── ui/            # server, page.html: the web page that opens on this machine only
+│   ├── convert.py     # turns Word and Hangul files into PDF with LibreOffice
 │   ├── providers.py   # cloud vendors: key names, default models, hosts
 │   ├── netguard.py    # refuses network access when offline is set
 │   └── pdfio.py       # PDF reading, rendering, deterministic saving
 ├── tests/
+├── packaging/         # build-macos.sh: builds the single executable
 ├── spec/              # the work spec (the original, split by section)
 ├── .claude/
 │   ├── settings.json  # deny rules, hook registration
@@ -208,10 +227,11 @@ Gotcha/
 ├── .githooks/         # pre-push: ruff, mypy, pytest before a push
 ├── CLAUDE.md          # short guidance for AI agents
 ├── USAGE.md           # usage guide (Korean)
+├── LICENSE            # AGPL-3.0
 └── pyproject.toml
 ```
 
-`docs/` is excluded from git and holds only notes on the paid plans.
+`docs/` is excluded from git and holds only business notes.
 
 ## Roadmap
 
@@ -224,7 +244,7 @@ Each phase is reviewed and approved before the next one starts.
 - [x] **Phase 4** — tracking watermark, `--copies`, `trace`. Done when: the examinee number is recovered from a PDF and from a screenshot-quality image
 - [x] **Phase 5** — model drift warnings, `report`, `profile`, finishing the docs. Done when: all tests pass
 - [ ] **Phase 6** — scenario B print profiles, calibration against real printing and photographing, watermark recovery from photos. The code is implemented. The completion criterion, "compare the simulation with real photos", needs pages that were actually printed and photographed, so it is still open
-- [ ] **Phase 7** — single executable for air-gapped networks, commercial license, profile subscription, web UI, HWP input (planned)
+- [ ] **Phase 7** — single executable for air-gapped networks, license, web UI, Hangul input. The code is implemented (the executable for macOS only). The completion criterion, "install and run on an air-gapped PC", has to be tried on such a PC, so it is still open, as is a Windows executable. The profile subscription will not be a paid product, so it is not built
 
 How this maps to the plan in the spec ([spec/11-plan.md](spec/11-plan.md)): spec steps 1 to 4 are Phases 1 to 4, spec step 5 is Phase 6, and spec step 6 is Phase 7. `examshield trace` and `examshield calibrate` are not in the spec's command list; they are added because watermark recovery and the comparison with real photos need them.
 
@@ -241,6 +261,8 @@ How this maps to the plan in the spec ([spec/11-plan.md](spec/11-plan.md)): spec
 | Local models | Ollama |
 | Cloud models | each vendor's official Python SDK (optional install `examshield[cloud]`) |
 | Key storage | keyring |
+| Web page | standard library `http.server`, one HTML page that loads nothing from outside |
+| Single executable | PyInstaller |
 | Quality | pytest, hypothesis, ruff, mypy strict, git pre-push hook |
 
 ## Contributing
@@ -249,4 +271,6 @@ The project is at an early stage. Please open an issue to discuss a change befor
 
 ## License
 
-Not decided. PyMuPDF is AGPL, so the choice has to fit with that ([spec/13-open-decisions.md](spec/13-open-decisions.md)). Until it is decided, no redistribution terms are granted.
+[GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). PyMuPDF, which does the PDF work, is AGPL, so distributing this tool means following the AGPL anyway; the same license was chosen to match. If you distribute a modified version or offer it as a network service, you must publish your modified source under the same terms.
+
+Using it without publishing source needs separate permission from the copyright holder of this repository, and a commercial PyMuPDF license bought from Artifex. No such commercial license is on sale. This paragraph is not legal advice.

@@ -4,6 +4,8 @@ import os
 import stat
 from pathlib import Path
 
+import numpy as np
+import pymupdf
 import pytest
 from typer.testing import CliRunner
 
@@ -13,6 +15,7 @@ from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile, load_profile, parse_profile
 from examshield.protect.pipeline import protect_bytes
 from examshield.protect.techniques.decoy import choice_count
+from examshield.verify.capture_sim import encode_png
 from examshield.verify.metrics import parse_answer
 from tests.conftest import A_PROFILES
 
@@ -188,7 +191,7 @@ def test_seed_file_changes_the_copy(sample_file: Path, tmp_path: Path) -> None:
 
 
 def test_unsupported_and_missing_inputs_exit_with_code_2(tmp_path: Path) -> None:
-    text = tmp_path / "exam.hwp"
+    text = tmp_path / "exam.txt"
     text.write_text("x")
 
     assert run_protect(text, tmp_path / "out", "a-decoy")[0] == 2
@@ -282,3 +285,114 @@ def test_rasterize_refuses_a_resolution_that_would_blur_small_text(sample_pdf: b
 
     with pytest.raises(ExamShieldError, match="dpi"):
         protect_bytes(sample_pdf, low)
+
+
+@pytest.mark.parametrize("suffix", [".hwp", ".hwpx", ".HWP"])
+def test_hangul_input_goes_through_the_converter_with_a_review_notice(
+    suffix: str, sample_pdf: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    (source / f"exam{suffix}").write_bytes(b"fake hangul file")
+    canned = tmp_path / "canned.pdf"
+    canned.write_bytes(sample_pdf)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    fake = tools / "soffice"
+    fake.write_text(
+        "#!/bin/bash\n"
+        'while [ $# -gt 0 ]; do [ "$1" = "--outdir" ] && out="$2"; last="$1"; shift; done\n'
+        f'echo "$last" > "{tmp_path}/source.txt"\n'
+        f'cp "{canned}" "$out/input.pdf"\n'
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    out = tmp_path / "out"
+
+    code, output = run_protect(source / f"exam{suffix}", out, "a-decoy")
+    checked = CliRunner().invoke(
+        app, ["check", str(source / f"exam{suffix}"), str(out / "exam.pdf")]
+    )
+
+    assert code == 0, output
+    assert "한글 문서는 LibreOffice가 PDF로 바꾼 결과를 원본으로 삼는다" in output
+    assert (tmp_path / "source.txt").read_text().strip().endswith(f"input{suffix.lower()}")
+    assert sorted(path.name for path in out.iterdir()) == [
+        "exam.job.json",
+        "exam.pdf",
+        "protect.log.jsonl",
+    ]
+    assert [path.name for path in source.iterdir()] == [f"exam{suffix}"]
+    assert checked.exit_code == 0, checked.output
+
+
+def test_hangul_input_that_libreoffice_cannot_open_points_to_pdf_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "exam.hwp"
+    source.write_bytes(b"fake")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    fake = tools / "soffice"
+    fake.write_text("#!/bin/bash\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
+
+    failed = run_protect(source, tmp_path / "out", "a-decoy")
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    missing = run_protect(source, tmp_path / "out2", "a-decoy")
+
+    assert failed[0] == 2 and "한글에서 PDF로 내보낸 파일" in failed[1]
+    assert missing[0] == 2 and "LibreOffice가 필요하다" in missing[1]
+
+
+def test_names_that_differ_only_in_case_are_refused_in_a_folder(
+    sample_pdf: bytes, tmp_path: Path
+) -> None:
+    source = tmp_path / "in"
+    source.mkdir()
+    (source / "exam.pdf").write_bytes(sample_pdf)
+    (source / "EXAM.docx").write_bytes(b"fake")
+    if len(list(source.iterdir())) != 2:
+        pytest.skip("대소문자를 구분하지 않는 파일 시스템이라 두 파일을 함께 둘 수 없다")
+
+    code, output = run_protect(source, tmp_path / "out", "none")
+
+    assert code == 2 and "이름이 같은 파일" in output
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_file_that_is_not_really_a_pdf_ends_in_a_clean_error(
+    sample_pdf: bytes, tmp_path: Path
+) -> None:
+    fake = tmp_path / "fake.pdf"
+    fake.write_bytes(encode_png(np.zeros((40, 40), dtype=np.uint8)))
+    locked = tmp_path / "locked.pdf"
+    locked.write_bytes(
+        open_pdf_bytes(sample_pdf).tobytes(encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="p")
+    )
+    cut = tmp_path / "cut.pdf"
+    cut.write_bytes(sample_pdf[: len(sample_pdf) // 2])
+    runner = CliRunner()
+
+    results = [
+        runner.invoke(
+            app, ["protect", str(path), "--out", str(tmp_path / "o"), "--profile", "a-decoy"]
+        )
+        for path in (fake, locked, cut)
+    ]
+    results += [runner.invoke(app, ["check", str(path), str(path)]) for path in (fake, locked)]
+
+    for result in results:
+        assert result.exit_code == 2 and result.exception.__class__ is SystemExit, result.output
+        assert result.stderr.startswith("오류:")
+
+
+def test_license_command_names_the_license_and_the_source() -> None:
+    result = CliRunner().invoke(app, ["license"])
+
+    assert result.exit_code == 0
+    assert (
+        "AGPL-3.0-or-later" in result.stdout and "github.com/Trapa-Eureka/Gotcha" in result.stdout
+    )
+    assert "PyMuPDF" in result.stdout

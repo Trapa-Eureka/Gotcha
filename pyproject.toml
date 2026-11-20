@@ -3,6 +3,8 @@ name = "examshield"
 version = "0.1.0"
 description = "시험 문서 AI 판독 저항 CLI: 내용은 그대로 둔 복사본을 만들고 저항 효과를 수치로 측정한다"
 readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "typer>=0.12",
@@ -23,7 +25,14 @@ cloud = ["openai>=1.40", "anthropic>=0.40", "google-genai>=1.0"]
 examshield = "examshield.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8", "hypothesis>=6.100", "ruff>=0.6", "mypy>=1.11", "types-PyYAML"]
+dev = [
+    "pytest>=8",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "types-PyYAML",
+    "pyinstaller>=6.22.3",
+]
 
 [build-system]
 requires = ["hatchling"]

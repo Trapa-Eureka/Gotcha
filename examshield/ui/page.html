@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>examshield</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1c1a; --muted: #6a675f; --line: #dcd9d0;
+  --accent: #1f5f4a; --accent-ink: #ffffff; --ok: #1f6b3a; --bad: #a12a22; --warn-bg: #fbf3d9;
+  --warn-ink: #5c4705; --code: #f0eee7;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171716; --panel: #212120; --ink: #ecebe6; --muted: #a09d94; --line: #3a3936;
+    --accent: #6fc3a4; --accent-ink: #10231c; --ok: #7fd09a; --bad: #f08a80; --warn-bg: #3a3214;
+    --warn-ink: #f0dc9a; --code: #2a2a28;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.6 -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
+}
+main { max-width: 860px; margin: 0 auto; padding: 32px 16px 64px; }
+header h1 { margin: 0; font-size: 1.5rem; letter-spacing: -0.01em; }
+header p { margin: 4px 0 0; color: var(--muted); }
+.local { display: inline-block; margin-top: 12px; padding: 2px 10px; border: 1px solid var(--line);
+  border-radius: 999px; font-size: 0.85rem; color: var(--muted); }
+section { margin-top: 24px; padding: 20px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; }
+h2 { margin: 0 0 4px; font-size: 1.1rem; }
+.hint { margin: 0 0 16px; color: var(--muted); font-size: 0.92rem; }
+label { display: block; margin: 14px 0 4px; font-weight: 600; font-size: 0.92rem; }
+input[type=file], select { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font: inherit; }
+button { margin-top: 16px; padding: 9px 18px; border: 0; border-radius: 6px; background: var(--accent);
+  color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: progress; }
+button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+.about { margin: 6px 0 0; color: var(--muted); font-size: 0.9rem; }
+.warn { margin: 8px 0 0; padding: 8px 12px; border-radius: 6px; background: var(--warn-bg);
+  color: var(--warn-ink); font-size: 0.9rem; }
+.result { margin-top: 16px; }
+.verdict { font-weight: 700; }
+.verdict.ok { color: var(--ok); }
+.verdict.bad { color: var(--bad); }
+pre { margin: 8px 0 0; padding: 12px; background: var(--code); border-radius: 6px; overflow-x: auto;
+  font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap; }
+.downloads a { display: inline-block; margin: 10px 12px 0 0; color: var(--accent); font-weight: 600; }
+.table { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.name { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: nowrap; }
+ul { margin: 8px 0 0; padding-left: 20px; }
+code { padding: 1px 5px; background: var(--code); border-radius: 4px; font-size: 0.88em; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>examshield</h1>
+    <p>시험 문서의 내용은 그대로 둔 채 복사본을 만들고, 원본과 같은지 검사한다.</p>
+    <span class="local">이 PC 안에서만 동작한다. 파일은 밖으로 나가지 않는다.</span>
+  </header>
+
+  <section aria-labelledby="protect-title">
+    <h2 id="protect-title">복사본 만들기</h2>
+    <p class="hint">PDF, Word(.docx), 한글(.hwp, .hwpx) 파일을 받는다. Word와 한글은 LibreOffice가 있어야 한다.</p>
+    <label for="protect-file">원본 파일</label>
+    <input id="protect-file" type="file" accept=".pdf,.docx,.hwp,.hwpx">
+    <label for="protect-profile">프로파일</label>
+    <select id="protect-profile"></select>
+    <p class="about" id="profile-about"></p>
+    <div id="profile-warnings"></div>
+    <button id="protect-run" type="button">복사본 만들기</button>
+    <div class="result" id="protect-result" aria-live="polite"></div>
+  </section>
+
+  <section aria-labelledby="check-title">
+    <h2 id="check-title">동일성 검사</h2>
+    <p class="hint">원본과 복사본의 쪽수, 텍스트, 그림, 렌더링을 비교한다. 텍스트 레이어를 바꾸는 프로파일로 만든 복사본은 작업 기록(.job.json)도 함께 준다.</p>
+    <label for="check-original">원본 파일</label>
+    <input id="check-original" type="file" accept=".pdf,.docx,.hwp,.hwpx">
+    <label for="check-copy">복사본 (PDF)</label>
+    <input id="check-copy" type="file" accept=".pdf">
+    <label for="check-job">작업 기록 (.job.json, 선택)</label>
+    <input id="check-job" type="file" accept=".json">
+    <button id="check-run" type="button">검사하기</button>
+    <div class="result" id="check-result" aria-live="polite"></div>
+  </section>
+
+  <section aria-labelledby="profiles-title">
+    <h2 id="profiles-title">프로파일</h2>
+    <p class="hint">검증 상태는 가장 최근 <code>verify</code> 리포트로 판정한다.</p>
+    <div class="table">
+      <table>
+        <thead><tr><th>이름</th><th>시나리오</th><th>상태</th><th>검증</th><th>설명</th></tr></thead>
+        <tbody id="profiles-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="cli-title">
+    <h2 id="cli-title">명령줄에서만 되는 것</h2>
+    <ul>
+      <li>수험번호별 복사본: <code>examshield protect --copies</code></li>
+      <li>유출본 추적: <code>examshield trace</code></li>
+      <li>AI 모델로 효과 측정: <code>examshield verify</code></li>
+      <li>인쇄물 사진의 촬영 조건 재기: <code>examshield calibrate</code></li>
+    </ul>
+  </section>
+</main>
+<script>
+"use strict";
+const TOKEN = "__TOKEN__";
+// 토큰이 주소창과 방문 기록에 남지 않게 한다.
+history.replaceState(null, "", "/");
+const byId = (id) => document.getElementById(id);
+let profiles = [];
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function readBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+    reader.onerror = () => reject(new Error("파일을 읽지 못했다."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function call(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Examshield-Token": TOKEN },
+    body: JSON.stringify(payload),
+  });
+  const answer = await response.json();
+  if (!response.ok) throw new Error(answer.error || "요청이 실패했다.");
+  return answer;
+}
+
+function showError(box, error) {
+  box.replaceChildren(el("p", "verdict bad", "오류: " + error.message));
+}
+
+function showProfile() {
+  const chosen = profiles.find((entry) => entry.name === byId("protect-profile").value);
+  byId("profile-about").textContent = chosen ? chosen.description : "";
+  const box = byId("profile-warnings");
+  box.replaceChildren();
+  if (!chosen) return;
+  if (chosen.needs_copies) {
+    box.append(el("p", "warn", "이 프로파일은 수험번호별 복사본용이다. 명령줄에서 examshield protect --copies로 쓴다."));
+  } else if (chosen.per_examinee) {
+    box.append(el("p", "warn", "여기서 만들면 무늬가 하나로 정해져 수험번호를 추적할 수 없다. 추적하려면 명령줄에서 --copies로 만든다."));
+  }
+  for (const warning of chosen.warnings) box.append(el("p", "warn", warning));
+}
+
+function download(name, bytes, type) {
+  const link = el("a", "", name + " 내려받기");
+  link.href = URL.createObjectURL(new Blob([bytes], { type }));
+  link.download = name;
+  return link;
+}
+
+async function runProtect() {
+  const box = byId("protect-result");
+  const file = byId("protect-file").files[0];
+  if (!file) return showError(box, new Error("원본 파일을 고른다."));
+  const button = byId("protect-run");
+  button.disabled = true;
+  box.replaceChildren(el("p", "about", "만드는 중이다. 긴 문서는 시간이 걸린다."));
+  try {
+    const answer = await call("/api/protect", {
+      name: file.name, file: await readBase64(file), profile: byId("protect-profile").value,
+    });
+    const nodes = [el("p", "verdict " + (answer.passed ? "ok" : "bad"),
+      answer.passed ? "검사 통과. 복사본을 내려받을 수 있다." : "검사 실패. 복사본을 내주지 않는다.")];
+    nodes.push(el("pre", "", answer.summary));
+    for (const note of answer.notes) nodes.push(el("p", "warn", note));
+    if (answer.pdf) {
+      const links = el("div", "downloads");
+      const bytes = Uint8Array.from(atob(answer.pdf), (char) => char.charCodeAt(0));
+      links.append(download(answer.file_name, bytes, "application/pdf"));
+      links.append(download(answer.job_name, answer.job, "application/json"));
+      nodes.push(links);
+    }
+    box.replaceChildren(...nodes);
+  } catch (error) {
+    showError(box, error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runCheck() {
+  const box = byId("check-result");
+  const original = byId("check-original").files[0];
+  const copy = byId("check-copy").files[0];
+  const job = byId("check-job").files[0];
+  if (!original || !copy) return showError(box, new Error("원본과 복사본을 모두 고른다."));
+  const button = byId("check-run");
+  button.disabled = true;
+  box.replaceChildren(el("p", "about", "검사하는 중이다."));
+  try {
+    const answer = await call("/api/check", {
+      name: original.name, file: await readBase64(original), copy: await readBase64(copy),
+      job: job ? await job.text() : null,
+    });
+    box.replaceChildren(
+      el("p", "verdict " + (answer.passed ? "ok" : "bad"), answer.passed ? "통과" : "실패"),
+      el("pre", "", answer.summary),
+    );
+  } catch (error) {
+    showError(box, error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadProfiles() {
+  const response = await fetch("/api/profiles?t=" + encodeURIComponent(TOKEN));
+  const answer = await response.json();
+  if (!response.ok) throw new Error(answer.error || "프로파일을 읽지 못했다.");
+  profiles = answer.profiles;
+  const select = byId("protect-profile");
+  const body = byId("profiles-body");
+  for (const entry of profiles) {
+    const option = el("option", "", entry.name);
+    option.value = entry.name;
+    select.append(option);
+    const row = el("tr");
+    row.append(el("td", "name", entry.name), el("td", "", entry.scenario), el("td", "", entry.status),
+      el("td", "", entry.verification), el("td", "", entry.description));
+    body.append(row);
+  }
+  select.value = profiles.some((entry) => entry.name === "a-remap-decoy") ? "a-remap-decoy" : select.value;
+  showProfile();
+}
+
+byId("protect-profile").addEventListener("change", showProfile);
+byId("protect-run").addEventListener("click", runProtect);
+byId("check-run").addEventListener("click", runCheck);
+loadProfiles().catch((error) => showError(byId("protect-result"), error));
+</script>
+</body>
+</html>

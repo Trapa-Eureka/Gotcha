@@ -9,6 +9,10 @@ from numpy.typing import NDArray
 
 GrayImage = NDArray[np.uint8]
 
+# MuPDF가 깨진 파일을 만나면 표준 출력에 직접 쓰는 진단 글을 끈다. 오류는 예외로 받는다.
+pymupdf.TOOLS.mupdf_display_errors(False)
+pymupdf.TOOLS.mupdf_display_warnings(False)
+
 _WHITESPACE = re.compile(r"\s+")
 
 

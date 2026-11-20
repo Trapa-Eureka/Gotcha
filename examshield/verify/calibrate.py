@@ -83,6 +83,8 @@ def open_plain_pdf(pdf: bytes, label: str) -> Any:
         doc = open_pdf_bytes(pdf)
     except Exception as error:
         raise ExamShieldError(f"{label}을(를) PDF로 열지 못했다.") from error
+    if not doc.is_pdf:
+        raise ExamShieldError(f"{label}이(가) PDF가 아니다.")
     if doc.needs_pass or doc.is_encrypted:
         raise ExamShieldError(f"{label}에 암호가 걸려 있다. 암호가 걸린 PDF는 처리하지 않는다.")
     if doc.page_count == 0:
