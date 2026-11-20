@@ -1,0 +1,5 @@
+name: none
+scenario: A
+status: active
+description: 변환 없는 대조군. 디지털 배포(파일을 AI에 직접 넣는 경로)에서 아무 처리도 하지 않았을 때의 점수를 잰다.
+techniques: []

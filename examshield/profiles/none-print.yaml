@@ -1,0 +1,15 @@
+name: none-print
+scenario: B
+status: active
+description: 변환 없는 대조군. 인쇄한 종이를 카메라로 촬영하는 경로를 시뮬레이션으로 거친 뒤의 점수를 잰다.
+techniques: []
+capture:
+  print_dpi: 300
+  capture_width: 1600
+  skew_degrees: 2.0
+  perspective: 0.03
+  illumination: 0.25
+  blur_sigma: 0.8
+  noise_sigma: 4.0
+  jpeg_quality: 80
+  seed: 20261120

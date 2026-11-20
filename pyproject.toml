@@ -39,6 +39,9 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "S110", "T20", "PLC0415"]
 
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120
+
 [tool.ruff.lint.per-file-ignores]
 "examshield/cli.py" = ["B008"]
 "examshield/verify/models/*.py" = ["PLC0415"]
@@ -57,4 +60,5 @@ follow_imports = "skip"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = ["ignore:builtin type .* has no __module__ attribute:DeprecationWarning"]
 markers = ["slow: 전체 verify 실행처럼 오래 걸리는 테스트"]

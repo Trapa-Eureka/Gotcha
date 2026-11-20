@@ -1,0 +1,52 @@
+version: v1
+source: 이 프로젝트가 직접 쓴 더미 문항. 기출문제를 쓰지 않았다.
+choices_per_item: 4
+items:
+  - id: v1-01
+    question: 물이 1기압에서 끓는 온도는 섭씨 몇 도인가?
+    choices: [50도, 80도, 100도, 120도]
+    answer: 3
+  - id: v1-02
+    question: 대한민국의 수도는 어디인가?
+    choices: [서울, 부산, 인천, 대전]
+    answer: 1
+  - id: v1-03
+    question: 삼각형의 세 내각의 합은 몇 도인가?
+    choices: [90도, 180도, 270도, 360도]
+    answer: 2
+  - id: v1-04
+    question: 태양계에서 태양에 가장 가까운 행성은 무엇인가?
+    choices: [금성, 지구, 화성, 수성]
+    answer: 4
+  - id: v1-05
+    question: 한글을 창제한 조선의 임금은 누구인가?
+    choices: [태조, 세종, 영조, 정조]
+    answer: 2
+  - id: v1-06
+    question: 12 곱하기 12의 값은 얼마인가?
+    choices: ["124", "132", "144", "156"]
+    answer: 3
+  - id: v1-07
+    question: 식물이 광합성을 할 때 흡수하는 기체는 무엇인가?
+    choices: [이산화탄소, 산소, 질소, 수소]
+    answer: 1
+  - id: v1-08
+    question: 1시간은 몇 초인가?
+    choices: [60초, 600초, 1800초, 3600초]
+    answer: 4
+  - id: v1-09
+    question: 다음 중 소수(prime number)인 것은 무엇인가?
+    choices: ["21", "27", "29", "33"]
+    answer: 3
+  - id: v1-10
+    question: 지구의 자연 위성은 무엇인가?
+    choices: [달, 포보스, 타이탄, 유로파]
+    answer: 1
+  - id: v1-11
+    question: 영어 단어 library의 뜻으로 알맞은 것은 무엇인가?
+    choices: [병원, 도서관, 우체국, 경찰서]
+    answer: 2
+  - id: v1-12
+    question: 원소 기호 Fe가 나타내는 원소는 무엇인가?
+    choices: [금, 은, 구리, 철]
+    answer: 4
