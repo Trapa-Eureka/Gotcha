@@ -26,7 +26,7 @@
 
 | 기능 | 상태 |
 |---|---|
-| 프로젝트 골격: uv, ruff, mypy, pytest, CI | 완료 |
+| 프로젝트 골격: uv, ruff, mypy, pytest, 푸시 전 검사(git pre-push 훅) | 완료 |
 | 개발용 안전 훅과 비밀 파일 읽기 차단 ([안전 훅](#안전-훅)) | 완료 |
 | 명세 분할(`spec/`)과 원본 동일성 검사 | 완료 |
 | 내장 문항 세트 v1 (직접 쓴 더미 12문항, 기출문제 아님) | 완료 |
@@ -115,6 +115,14 @@ uv run ruff check .      # 린트
 uv run mypy              # 타입 검사
 ```
 
+푸시 전 검사를 켜려면 저장소를 받은 뒤 한 번 실행한다.
+
+```bash
+git config core.hooksPath .githooks
+```
+
+그러면 `git push` 직전에 ruff, mypy, pytest가 돌고, 하나라도 실패하면 푸시가 막힌다. 서버에서 도는 CI는 쓰지 않는다. 각자 PC에서 도는 검사라 `git push --no-verify`로 건너뛸 수 있다.
+
 ## 알려진 한계
 
 - `verify`는 아직 대조군만 잰다. 교란 기법이 든 프로파일은 `protect`가 생기는 Phase 2부터 측정한다.
@@ -166,7 +174,7 @@ Gotcha/
 │   ├── hooks/         # 차단, 린트, 테스트 훅
 │   ├── skills/        # phase-work: Phase 하나를 진행하는 절차
 │   └── agents/        # fresh-reviewer: 처음 보는 눈으로 하는 검토
-├── .github/workflows/ # CI: ruff, mypy, pytest
+├── .githooks/         # pre-push: 푸시 전에 ruff, mypy, pytest
 ├── CLAUDE.md          # AI 에이전트용 짧은 안내
 ├── USAGE.md           # 사용법
 └── pyproject.toml
@@ -178,7 +186,7 @@ Gotcha/
 
 Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간다.
 
-- [x] **Phase 0** — 프로젝트 골격: 명세 분할, 훅과 거부 규칙, 린트·타입 검사·CI, 문서 초안
+- [x] **Phase 0** — 프로젝트 골격: 명세 분할, 훅과 거부 규칙, 린트·타입 검사·푸시 전 검사, 문서 초안
 - [x] **Phase 1** — `verify`: 문항 세트, 촬영 시뮬레이션, 기준선(텍스트 추출, Tesseract), 로컬 모델, 리포트. 완료 기준: 변환 없는 대조군 점수가 나온다
 - [ ] **Phase 2** — `protect` + `check`, 시나리오 A 프로파일(이미지화, 글리프 매핑 변조, 숨은 미끼). 완료 기준: 결정적 출력, 네트워크 0건 테스트 통과
 - [ ] **Phase 3** — `auth`, 클라우드 모델 검증, `--offline`. 완료 기준: 키 없이 실행하면 안내 후 종료, 호출 전 확인 절차 동작
@@ -202,7 +210,7 @@ Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간�
 | 로컬 모델 | Ollama |
 | 클라우드 모델 | 각 사 공식 Python SDK (선택 설치 `examshield[cloud]`) |
 | 키 저장 | keyring |
-| 품질 | pytest, hypothesis, ruff, mypy strict, GitHub Actions |
+| 품질 | pytest, hypothesis, ruff, mypy strict, git pre-push 훅 |
 
 ## 기여
 

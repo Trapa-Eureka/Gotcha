@@ -1,0 +1,20 @@
+#!/bin/bash
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "pre-push: uv가 없어 검사를 못 했다. 설치 후 다시 푸시한다." >&2
+  exit 1
+fi
+
+run() {
+  echo "pre-push: $*" >&2
+  if ! "$@" >&2; then
+    echo "pre-push: 검사 실패. 푸시를 막았다." >&2
+    exit 1
+  fi
+}
+
+run uv run --no-sync ruff check .
+run uv run --no-sync mypy
+run uv run --no-sync pytest -q
+exit 0
