@@ -5,9 +5,11 @@ import unicodedata
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 import typer
 
+from examshield import __version__
 from examshield.auth.keys import delete_key, find_key, setup_help, store_key, usable
 from examshield.benchmark import load_items
 from examshield.check.compare import Expectation, compare, format_result
@@ -15,7 +17,7 @@ from examshield.convert import SUPPORTED_SUFFIXES, read_document
 from examshield.errors import ExamShieldError, ModelUnavailableError
 from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
-from examshield.profiles import Profile, load_profile
+from examshield.profiles import Profile, list_profile_names, load_profile
 from examshield.protect.copies import (
     check_seed,
     map_row,
@@ -36,12 +38,25 @@ from examshield.protect.pipeline import (
 from examshield.providers import PROVIDERS, Provider, get_provider
 from examshield.trace.detect import format_trace
 from examshield.trace.detect import trace as trace_document
+from examshield.verify.drift import (
+    DEFAULT_REPORT_DIR,
+    NOT_APPLICABLE,
+    RECORD_DIR,
+    Assessment,
+    Current,
+    assess,
+    check_report,
+    find_latest,
+    format_assessment,
+    record_refusal,
+    write_record,
+)
 from examshield.verify.models.base import ModelClient
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.cloud import chosen_model
 from examshield.verify.models.local import OllamaModel
 from examshield.verify.models.mock import MockModel
-from examshield.verify.report import format_report, load_report, write_report
+from examshield.verify.report import display_width, format_report, load_report, write_report
 from examshield.verify.runner import (
     Skipped,
     Subject,
@@ -92,6 +107,38 @@ CLOUD_CLASSES = {
 }
 auth_app = typer.Typer(no_args_is_help=True, help="클라우드 모델용 API 키를 OS 키체인에 보관한다.")
 app.add_typer(auth_app, name="auth")
+profile_app = typer.Typer(no_args_is_help=True, help="프로파일 목록과 최신 검증 상태를 보여준다.")
+app.add_typer(profile_app, name="profile")
+
+
+def _current() -> Current:
+    items = load_items()
+    return Current(__version__, items.version, items.sha256)
+
+
+def _assess(profile: Profile, reports: Path | None = None) -> Assessment:
+    """저장소의 검증 기록과 reports 폴더에서 가장 최근 리포트를 찾아 판정한다."""
+    now = datetime.now().astimezone()
+    found, source, changed = find_latest(profile, [RECORD_DIR, reports or DEFAULT_REPORT_DIR], now)
+    return assess(profile, found, now, _current(), changed=changed, source=source)
+
+
+def _report_verdict(report: dict[str, Any]) -> str | None:
+    """리포트 하나를 지금의 프로파일, 도구, 문항 세트에 비춰 본 판정. 해당 없으면 None."""
+    now = datetime.now().astimezone()
+    try:
+        checked = check_report(report, now)
+        profile = load_profile(checked.profile_name)
+        if not profile.techniques:
+            return None
+        refusal = record_refusal(report, now)
+        if refusal is not None:
+            return f"참고: 프로파일의 검증 기록으로 쓰지 않는다. {refusal}"
+        changed = checked.profile_sha256 != profile.sha256
+        assessment = assess(profile, None if changed else report, now, _current(), changed=changed)
+    except (ValueError, ExamShieldError) as error:
+        return f"참고: 이 리포트로는 판정하지 못한다. {error}"
+    return None if assessment.state == NOT_APPLICABLE else format_assessment(assessment)
 
 
 @app.callback()
@@ -195,9 +242,19 @@ def verify(
         "--allow-custom",
         help="내장 문항 세트 대신 이 PDF로 측정한다. 클라우드 모델과 함께 쓰면 파일 내용이 밖으로 나간다.",
     ),
+    record: bool = typer.Option(
+        False,
+        "--record",
+        help="결과를 이 프로파일의 최신 검증 기록으로 저장소(examshield/profiles/verified)에 남긴다.",
+    ),
 ) -> None:
     try:
         loaded = load_profile(profile)
+        if record and (models is ModelGroup.mock or allow_custom is not None):
+            raise ExamShieldError(
+                "--record는 내장 문항 세트를 실제 AI 모델로 잰 결과에만 쓴다. "
+                "--models mock이나 --allow-custom과 함께 쓸 수 없다."
+            )
         clients: list[ModelClient] = []
         skipped: list[Skipped] = []
         cloud: list[ModelClient] = []
@@ -232,10 +289,22 @@ def verify(
     except ExamShieldError as error:
         raise _fail(error) from error
     typer.echo(format_report(report))
+    verdict = _report_verdict(report)
+    if verdict:
+        typer.echo("\n" + verdict)
     typer.echo(f"\n리포트: {path}")
     if not any(row["errors"] < row["items"] for row in report["results"]):
         typer.echo("오류: 측정된 값이 하나도 없다. 위의 건너뜀과 오류 수를 확인한다.", err=True)
         raise typer.Exit(1)
+    if record:
+        refusal = record_refusal(report)
+        if refusal is not None:
+            typer.echo(f"오류: 검증 기록으로 남기지 않았다. {refusal}", err=True)
+            raise typer.Exit(1)
+        try:
+            typer.echo(f"검증 기록: {write_record(report, RECORD_DIR)}")
+        except OSError as error:
+            raise _fail(ExamShieldError(f"검증 기록을 쓰지 못했다: {error}")) from error
 
 
 @auth_app.command("add", help="API 키를 물어서 OS 키체인에 저장한다. 키는 화면에 보이지 않는다.")
@@ -274,9 +343,69 @@ def auth_remove(provider: str = typer.Argument(..., help="openai, anthropic, goo
 @app.command(help="verify가 쓴 리포트 파일을 표로 보여준다.")
 def report(report_file: Path = typer.Argument(..., help="리포트 JSON 파일")) -> None:
     try:
-        typer.echo(format_report(load_report(report_file)))
+        loaded = load_report(report_file)
+        typer.echo(format_report(loaded))
+        verdict = _report_verdict(loaded)
     except ExamShieldError as error:
         raise _fail(error) from error
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        raise _fail(ExamShieldError(f"리포트의 형식이 맞지 않는다: {error!r}")) from error
+    if verdict:
+        typer.echo("\n" + verdict)
+
+
+@profile_app.command("list", help="프로파일 이름, 시나리오, 상태, 최신 검증 상태를 보여준다.")
+def profile_list(
+    reports: Path | None = typer.Option(
+        None, "--reports", help="verify 리포트가 있는 폴더. 기본값 out/reports"
+    ),
+) -> None:
+    try:
+        rows = [("이름", "시나리오", "상태", "검증", "설명")]
+        for name in list_profile_names():
+            loaded = load_profile(name)
+            rows.append(
+                (
+                    name,
+                    loaded.scenario,
+                    loaded.status,
+                    _assess(loaded, reports).label,
+                    loaded.description,
+                )
+            )
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    widths = [max(display_width(row[i]) for row in rows) for i in range(4)]
+    for row in rows:
+        cells = [cell + " " * (widths[i] - display_width(cell)) for i, cell in enumerate(row[:4])]
+        typer.echo("  ".join([*cells, row[4]]).rstrip())
+
+
+@profile_app.command("show", help="프로파일 하나의 기법, 해시, 최신 검증 결과와 경고를 보여준다.")
+def profile_show(
+    name: str = typer.Argument(..., help="프로파일 이름. 예: a-remap-decoy"),
+    reports: Path | None = typer.Option(
+        None, "--reports", help="verify 리포트가 있는 폴더. 기본값 out/reports"
+    ),
+) -> None:
+    try:
+        loaded = load_profile(name)
+        assessment = _assess(loaded, reports)
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    typer.echo(f"이름         {loaded.name}")
+    typer.echo(f"시나리오     {loaded.scenario}")
+    typer.echo(f"상태         {loaded.status}")
+    typer.echo(f"설명         {loaded.description}")
+    typer.echo(f"해시         {loaded.sha256}")
+    typer.echo("기법" + ("" if loaded.techniques else "         없음 (대조군)"))
+    for technique in loaded.techniques:
+        params = ", ".join(f"{key}={value}" for key, value in technique.params.items())
+        typer.echo(f"  - {technique.id}" + (f" ({params})" if params else ""))
+    if loaded.capture:
+        shown = ", ".join(f"{key}={value}" for key, value in loaded.capture.items())
+        typer.echo(f"촬영 조건    {shown}")
+    typer.echo(format_assessment(assessment))
 
 
 def _inputs(source: Path) -> list[Path]:
@@ -320,6 +449,7 @@ def protect(
     ),
 ) -> None:
     failed = 0
+    loaded: Profile | None = None
     try:
         loaded = load_profile(profile)
         sources = _inputs(source)
@@ -367,8 +497,21 @@ def protect(
         raise _fail(error) from error
     except OSError as error:
         raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    finally:
+        # 경고는 결과를 막지 않는다. 복사본은 시각과 무관하게 같은 바이트로 나온다.
+        if loaded is not None:
+            _warn_drift(loaded)
     if failed:
         raise typer.Exit(1)
+
+
+def _warn_drift(profile: Profile) -> None:
+    try:
+        warnings = _assess(profile).warnings
+    except Exception:  # noqa: BLE001 - 경고를 못 만들었다고 protect의 결과를 바꾸지 않는다.
+        return
+    for warning in warnings:
+        typer.echo(f"경고: {warning}", err=True)
 
 
 def _inside(path: Path, folder: Path) -> bool:

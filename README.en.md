@@ -2,9 +2,9 @@
 
 An offline CLI that turns an exam document on your machine (PDF, Word) into a copy with the same content that is harder for AI to read and solve, and proves the effect with numbers stamped with a date and model versions.
 
-> **Status: early development (Phase 4 done).**
-> `protect` (makes the copies), `check` (checks the content is the same), `verify` and `report` (measure the effect) and `trace` (finds whose copy leaked) work. Cloud model clients (OpenAI, Anthropic, Google) are included but have never been called with a real key. There are no scores from a real AI model yet; the only numbers so far are the text-extraction and OCR baselines.
-> The free scope (Phases 1 to 5) is being built in order. Paid plans are still in planning.
+> **Status: early development (Phase 5 done, free scope implemented).**
+> `protect` (makes the copies), `check` (checks the content is the same), `verify` and `report` (measure the effect) `trace` (finds whose copy leaked) and `profile` (lists profiles and their verification state) work. Cloud model clients (OpenAI, Anthropic, Google) are included but have never been called with a real key. There are no scores from a real AI model yet; the only numbers so far are the text-extraction and OCR baselines.
+> The free scope (Phases 1 to 5) is fully built. No profile has been verified against a real AI model yet, so `protect` prints a warning for every `a-` profile. Paid plans are still in planning.
 
 **Jump to:** [Quick start](#quick-start) · [**Usage**](USAGE.md) · [Installation](#installation) · [Roadmap](#roadmap) · [Spec](spec/README.md) · [한국어](README.md)
 
@@ -42,7 +42,7 @@ It is for teachers, exam writers and assessment bodies who hand out online exams
 | `examshield auth` — keeps API keys in the OS keychain | Done (tested with a test keychain only, never written to a real OS keychain) |
 | Cloud model verification (your own key, off by default), confirmation before calls, `--offline` | Done (each vendor's SDK tested against a fake server only, no real call was made) |
 | Tracking watermark per examinee, `--copies`, `examshield trace` | Done (recovered from PDFs and screenshot-quality pictures; checked with PDFs rendered to pictures, not real screen captures) |
-| Model drift warnings, `examshield profile` | To do (Phase 5) |
+| Model drift warnings (`protect` warns when verification is missing, older than 30 days or below the bar), `examshield profile list\|show` | Done (no verification record from a real AI yet) |
 | Scenario B (printed exam) profiles, watermark recovery from photos | Planned (paid) |
 | Single executable for air-gapped networks, commercial license, verified profile subscription | Planned (paid) |
 
@@ -53,6 +53,7 @@ It is for teachers, exam writers and assessment bodies who hand out online exams
 - **Same input, same output**: with the same input, profile and seed, the copy is identical byte for byte.
 - **What gets verified is the profile, not your document**: `verify` applies the profile to the built-in public item set and measures that. A real exam paper is not sent to the cloud.
 - **API keys are yours**: cloud verification is optional. Keys are read from environment variables or the OS keychain and never written to a plain-text file.
+- **The effect expires**: a verification result is a measurement against one model on one day. `protect` looks up the profile's latest verification report and warns when there is none, when it is older than 30 days, or when it falls below the bar. A warning never blocks the copy.
 
 All security requirements are in [spec/05-security.md](spec/05-security.md).
 
@@ -73,7 +74,7 @@ cd Gotcha
 uv sync
 ```
 
-Once the commands are in place, the plan is to make this work:
+The package is not on PyPI yet. Once it is, the plan is to make this work:
 
 ```bash
 uv tool install examshield
@@ -104,11 +105,11 @@ tesseract-eng  이미지         변환본  40.4%        -       -            0
 
 Extracting the text layer gets only 21.5% of the original right (대조군 is the control group, 변환본 the protected copy). The path that reads the page as a picture (Tesseract) scores the same for both, which means this profile does not stop an AI that reads the picture. The Tesseract number itself is low because the items are in Korean and the Korean data is missing.
 
-The profiles are `none`, `a-rasterize`, `a-glyph-remap`, `a-decoy` and `a-remap-decoy`. All four `a-` profiles are `experimental`: their effect has not been confirmed against a real AI.
+`uv run examshield profile list` shows the profiles and their verification state. All six `a-` profiles are `experimental`: their effect has not been confirmed against a real AI.
 
 ## Usage
 
-Every command is explained in **[USAGE.md](USAGE.md)** (in Korean). The design of the commands that do not exist yet is in [spec/06-commands.md](spec/06-commands.md).
+Every command is explained in **[USAGE.md](USAGE.md)** (in Korean). The original design of the commands is in [spec/06-commands.md](spec/06-commands.md).
 
 ### Develop this repository
 
@@ -149,6 +150,9 @@ After that, ruff, mypy and pytest run right before `git push`, and the push is b
 - `mock-reader` under `--models mock` is not a real AI. It exists to check the measuring pipeline.
 - Step 0 of the spec (the feasibility experiment) was not done. It needs real AI models and API keys, and can be run with `verify`.
 - Research has found that scrambled fonts, contrast distortion and interference lines do almost nothing against current multimodal AI. If no technique works, the direction narrows to "decoy + tracking" ([spec/12-risks.md](spec/12-risks.md)).
+- No profile has a verification record. `verify` has never been run against a real AI model. The drift warnings were therefore tested only with hand-made reports.
+- The drift bar (for each AI model, on the path it solved best, accuracy on the protected copy at most half of the control) and the 30 days are values chosen here; the spec gives no numbers. With 12 items, one or two answers can flip the verdict.
+- Marking a profile that fell below the bar as `deprecated` is not automatic. `protect` warns that it should be changed, and a person edits the profile YAML.
 - The safety hooks are a safety net that matches command text. A wrapped or indirect command can slip past them.
 
 ## Paid plans (planned)
@@ -177,13 +181,13 @@ The hooks exit with code 2 on failure, because that is what sends the failure te
 ```
 Gotcha/
 ├── examshield/
-│   ├── cli.py         # Typer entry point: protect, check, verify, report, auth, trace
-│   ├── protect/       # pipeline, techniques/(rasterize, glyph_remap, decoy)
+│   ├── cli.py         # Typer entry point: protect, check, verify, report, auth, trace, profile
+│   ├── protect/       # pipeline, copies, techniques/(rasterize, glyph_remap, decoy, watermark)
 │   ├── check/         # compare: structure, text, rendering, OCR
 │   ├── trace/         # detect: aligns a leak with the original and finds the examinee pattern
 │   ├── benchmark/     # item set (v1) and PDF rendering
-│   ├── profiles/      # profile YAML: none, none-print, a-*
-│   ├── verify/        # runner, capture_sim, metrics, report, models/
+│   ├── profiles/      # profile YAML: none, none-print, a-*. verified/ holds the latest verification records
+│   ├── verify/        # runner, capture_sim, metrics, report, drift, models/
 │   ├── auth/          # keys: finds API keys in environment variables and the OS keychain
 │   ├── providers.py   # cloud vendors: key names, default models, hosts
 │   ├── netguard.py    # refuses network access when offline is set
@@ -212,7 +216,7 @@ Each phase is reviewed and approved before the next one starts.
 - [x] **Phase 2** — `protect` + `check`, scenario A profiles (rasterizing, glyph mapping scrambling, hidden decoys). Done when: output is deterministic and the zero-network tests pass
 - [x] **Phase 3** — `auth`, cloud model verification, `--offline`. Done when: running without a key explains what to do and exits, and the confirmation step before a call works
 - [x] **Phase 4** — tracking watermark, `--copies`, `trace`. Done when: the examinee number is recovered from a PDF and from a screenshot-quality image
-- [ ] **Phase 5** — model drift warnings, `report`, `profile`, finishing the docs. Done when: all tests pass
+- [x] **Phase 5** — model drift warnings, `report`, `profile`, finishing the docs. Done when: all tests pass
 - [ ] **Phase 6** — scenario B print profiles, calibration against real printing and photographing, watermark recovery from photos (planned, paid)
 - [ ] **Phase 7** — single executable for air-gapped networks, commercial license, profile subscription, web UI, HWP input (planned, paid)
 

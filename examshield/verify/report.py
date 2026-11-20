@@ -78,9 +78,11 @@ def _table(results: list[dict[str, Any]]) -> str:
                 str(row["errors"]),
             )
         )
-    widths = [max(_width(row[i]) for row in rows) for i in range(len(header))]
+    widths = [max(display_width(row[i]) for row in rows) for i in range(len(header))]
     return "\n".join(
-        "  ".join(cell + " " * (widths[i] - _width(cell)) for i, cell in enumerate(row)).rstrip()
+        "  ".join(
+            cell + " " * (widths[i] - display_width(cell)) for i, cell in enumerate(row)
+        ).rstrip()
         for row in rows
     )
 
@@ -89,5 +91,5 @@ def _percent(value: float | None) -> str:
     return "-" if value is None else f"{value * 100:.1f}%"
 
 
-def _width(text: str) -> int:
+def display_width(text: str) -> int:
     return sum(2 if ord(char) > 0x2E7F else 1 for char in text)

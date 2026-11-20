@@ -10,9 +10,9 @@
 | 저장된 리포트를 다시 본다 | [`examshield report`](#리포트-보기-report) | 완료 |
 | 클라우드 모델용 API 키를 등록한다 | [`examshield auth`](#api-키-auth) | 완료 |
 | 수험번호별 복사본을 만들고 유출본을 추적한다 | [`examshield protect --copies`, `examshield trace`](#수험번호별-복사본과-추적-copies-trace) | 완료 |
-| 프로파일 목록을 본다 | `examshield profile` | 예정 (Phase 5) |
+| 프로파일 목록과 검증 상태를 본다 | [`examshield profile`](#프로파일-보기-profile) | 완료 |
 
-아직 없는 명령의 설계는 [spec/06-commands.md](spec/06-commands.md)에 있다.
+명령의 원래 설계는 [spec/06-commands.md](spec/06-commands.md)에 있다.
 
 ## 복사본 만들기 (protect)
 
@@ -44,6 +44,8 @@ uv run examshield protect 시험지.pdf --out out/copies --profile a-remap-decoy
 | `a-full` | 글리프 변조, 미끼, 워터마크를 모두 쓴다. `--copies`가 필요하다 | 미끼 문구만 읽히고 본문은 엉뚱한 글자 |
 
 `a-` 프로파일은 사람이 읽는 내용을 바꾸지 않는다(워터마크는 바탕만 아주 조금 어둡게 한다). 그래서 쪽을 그림으로 읽는 AI에는 효과가 없다. 모두 `experimental` 상태다.
+
+`protect`는 끝날 때 프로파일의 검증 상태를 보고 경고를 낸다. 경고가 나와도 복사본은 만들어지고 종료 코드도 바뀌지 않는다. 자세한 내용은 [검증이 오래되면](#검증이-오래되면-드리프트-경고)에 있다.
 
 ### 나오는 파일
 
@@ -133,7 +135,7 @@ uv run examshield verify --profile none --models local
 
 | 옵션 | 뜻 |
 |---|---|
-| `--profile <이름>` | 측정할 프로파일. `none`, `none-print`(인쇄·촬영 대조군), `a-rasterize`, `a-glyph-remap`, `a-decoy`, `a-remap-decoy` |
+| `--profile <이름>` | 측정할 프로파일. `none`, `none-print`(인쇄·촬영 대조군), `a-rasterize`, `a-glyph-remap`, `a-decoy`, `a-remap-decoy`, `a-watermark`, `a-full` |
 | `--models local` | 기본값. 텍스트 레이어 추출, Tesseract, Ollama. 없는 것은 건너뛴다 |
 | `--models mock` | 실제 AI가 아닌 모의 모델. 설치 없이 파이프라인이 도는지 볼 때 쓴다 |
 | `--models cloud` | OpenAI, Anthropic, Google 모델. 키가 있는 회사만 부른다. 호출 전에 확인을 받는다 |
@@ -141,6 +143,7 @@ uv run examshield verify --profile none --models local
 | `--yes` | 클라우드 호출 전 확인 질문을 건너뛴다 |
 | `--allow-custom <PDF>` | 내장 문항 세트 대신 이 파일로 측정한다. 정답을 모르므로 정답률은 나오지 않는다 |
 | `--out <폴더>` | 리포트를 쓸 폴더. 기본값 `out/reports` |
+| `--record` | 결과를 이 프로파일의 최신 검증 기록으로 저장소(`examshield/profiles/verified/`)에 남긴다. 내장 문항 세트를 실제 AI 모델로 쟀을 때만 된다 |
 | `--local-model <이름>` | 쓸 Ollama 모델. 없으면 환경변수 `EXAMSHIELD_OLLAMA_MODEL`, 그것도 없으면 설치된 첫 모델 |
 
 ### 경로 세 가지
@@ -235,3 +238,60 @@ uv run examshield report out/reports/verify-none-20261120T140750.json
 ```
 
 저장된 리포트를 `verify`가 끝에 보여준 것과 같은 표로 다시 보여준다. 필수 항목이 없는 파일은 거부하고 종료 코드 2로 끝난다.
+
+교란 기법이 든 프로파일의 리포트면 표 아래에 판정이 붙는다. 판정은 리포트를 지금의 프로파일, 도구 버전, 문항 세트에 비춰 본 것이다.
+
+## 프로파일 보기 (profile)
+
+```bash
+uv run examshield profile list
+uv run examshield profile show a-remap-decoy
+```
+
+`profile list`는 프로파일마다 이름, 시나리오, 상태, 검증 상태, 설명을 한 줄로 보여준다. `profile show`는 프로파일 하나의 기법과 설정값, 해시, 최신 검증 결과와 경고를 보여준다.
+
+| 상태 | 뜻 |
+|---|---|
+| `active` | 쓸 수 있다 |
+| `experimental` | 효과가 확인되지 않았다. `protect`가 경고한다 |
+| `deprecated` | 검증에서 기준에 못 미쳤다. `protect`가 경고한다 |
+
+| 검증 상태 | 뜻 |
+|---|---|
+| 검증 안 됨 | 이 프로파일(지금 내용 그대로)을 실제 AI 모델로 잰 리포트가 없다. 또는 가장 최근 리포트에 판정하지 못한 AI 모델이 있다 |
+| 기준 통과 | 가장 최근 리포트에서 오류 없이 끝까지 잰 AI 모델을 모두 막았다. 건너뛴 모델은 경고로 따로 알린다 |
+| 기준 미달 | 가장 최근 리포트에서 못 막은 AI 모델이 있다 |
+| 대상 아님 | 판독을 막는 기법이 없다 (대조군, 워터마크만 있는 프로파일) |
+
+`--reports <폴더>`로 리포트를 찾을 폴더를 바꾼다. 기본값은 `out/reports`다.
+
+## 검증이 오래되면 (드리프트 경고)
+
+교란 효과는 특정 날짜의 특정 모델을 상대로 잰 값이다. AI 회사는 몇 달마다 새 모델을 내고 같은 이름의 모델도 예고 없이 바꾼다. 그래서 `protect`, `profile list`, `profile show`는 프로파일의 가장 최근 검증 리포트를 찾아 판정한다.
+
+리포트는 두 곳에서 찾는다.
+
+- `out/reports/`: `verify`가 리포트를 쓰는 기본 폴더. 명령을 실행한 폴더 기준이다.
+- `examshield/profiles/verified/<프로파일>.json`: 저장소에 남긴 검증 기록. `verify --record`가 쓴다.
+
+두 곳을 통틀어 실행 날짜가 가장 늦은 리포트 하나를 쓴다. 다음 리포트는 세지 않는다: 다른 프로파일의 것, 프로파일 내용(해시)이 달랐을 때의 것, `--allow-custom`으로 잰 것, 실제 AI 모델이 한 번도 답하지 않은 것(`--models mock`, 기준선만 돈 실행), 실행 날짜가 하루 넘게 미래인 것, 값이 맞지 않는 것(정답률이 0~1 밖, 같은 이름의 모델이 둘 등). 읽지 못하는 파일은 건너뛴다.
+
+| 경고가 나오는 경우 | 할 일 |
+|---|---|
+| 검증한 기록이 없다 | `examshield verify --profile <이름> --models all` |
+| 프로파일 내용이 마지막 검증 뒤에 바뀌었다 | 다시 잰다 |
+| 마지막 검증이 30일보다 오래됐다 | 다시 잰다. 시험 직전에도 다시 잰다 |
+| 도구 버전이나 문항 세트가 검증 때와 다르다 | 다시 잰다 |
+| 클라우드 모델 없이 로컬 모델로만 쟀다 | 로컬 모델을 막았다고 클라우드 모델도 막는 것은 아니다. 가능하면 `--models all`로 잰다 |
+| 판정하지 못한 AI 모델이 있다 (호출 오류, 빠진 경로, 대조군도 못 품) | 오류 원인을 고치고 다시 잰다 |
+| 건너뛴 모델이 있다 (키 없음, 미설치 등) | 그 모델은 판정에 들어가지 않았다. 필요하면 준비하고 다시 잰다 |
+| 기준에 못 미쳤다 | 그 프로파일을 쓰지 않는다. 프로파일 YAML의 `status`를 `deprecated`로 바꾼다 |
+| 프로파일이 `experimental` 또는 `deprecated`다 | 효과를 믿지 않는다 |
+
+기준은 이렇다. AI 모델마다 가장 잘 풀린 경로의 정답률을 대조군과 변환본에서 하나씩 고른다. 부정행위자는 가장 잘 풀리는 경로를 쓰기 때문이다. 변환본의 정답률이 대조군의 절반 이하면 그 모델을 막았다고 본다. 못 막은 모델이 하나라도 있으면 기준 미달이다. 호출 오류가 한 건이라도 있거나, 대조군과 변환본에서 잰 경로가 다르거나, 대조군도 풀지 못한 모델은 '판정 못 함'이고, 그런 모델이 있으면 기준 통과로 치지 않는다. 다만 일부만 쟀어도 변환본 정답률이 기준을 넘으면 못 막은 것으로 본다. 텍스트 추출과 Tesseract 같은 기준선은 AI 모델이 아니라서 판정에 쓰지 않는다.
+
+- 경고는 표준 오류로 나간다. 복사본, 작업 기록, 종료 코드는 경고가 있든 없든 같다.
+- 판정은 리포트 파일을 읽기만 한다. 네트워크를 쓰지 않는다.
+- `verify --record`는 그 프로파일의 예전 기록을 덮어쓴다. 저장소를 받아서 쓰는 경우를 위한 것이다. 패키지로 설치했다면 기록이 설치 폴더에 쓰이므로 `out/reports`를 쓴다.
+- 최근 리포트 하나만 본다. `--models all`로 잰 뒤 `--models local`로 다시 재면 클라우드 결과는 판정에서 빠진다.
+- 절반이라는 기준과 30일은 명세에 숫자가 없어 이 도구가 정한 값이다. 문항이 12개라 한두 문항 차이로 판정이 바뀔 수 있다.

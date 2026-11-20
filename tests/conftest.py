@@ -80,3 +80,12 @@ def isolated_credentials(monkeypatch: pytest.MonkeyPatch) -> Iterator[MemoryKeyr
     keyring.set_keyring(memory)
     yield memory
     keyring.set_keyring(previous)
+
+
+@pytest.fixture(autouse=True)
+def isolated_verification(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
+    """테스트가 개발자의 out/reports나 저장소의 검증 기록을 읽거나 쓰지 않게 한다."""
+    folders = {"records": tmp_path / "verified-records", "reports": tmp_path / "verify-reports"}
+    monkeypatch.setattr("examshield.cli.RECORD_DIR", folders["records"])
+    monkeypatch.setattr("examshield.cli.DEFAULT_REPORT_DIR", folders["reports"])
+    return folders

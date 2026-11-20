@@ -2,9 +2,9 @@
 
 로컬에 있는 시험 문서(PDF, Word)를 내용은 그대로 둔 채 AI가 읽고 풀기 어렵게 재가공한 복사본으로 만들고, 그 효과를 날짜와 모델 버전이 찍힌 수치로 증명하는 오프라인 CLI.
 
-> **상태: 초기 개발 (Phase 4 완료).**
-> 복사본을 만드는 `protect`, 내용이 같은지 검사하는 `check`, 효과를 재는 `verify`와 `report`, 유출본의 수험번호를 찾는 `trace`가 동작한다. 클라우드 모델(OpenAI, Anthropic, Google) 연결도 들어 있지만 실제 키로 호출해 본 적은 없다. 실제 AI 모델로 잰 점수는 아직 없고, 지금 있는 수치는 텍스트 추출과 OCR 기준선뿐이다.
-> 무료 범위(Phase 1~5)를 순서대로 만드는 중이고, 유료 플랜은 계획중이다.
+> **상태: 초기 개발 (Phase 5 완료, 무료 범위 구현 끝).**
+> 복사본을 만드는 `protect`, 내용이 같은지 검사하는 `check`, 효과를 재는 `verify`와 `report`, 유출본의 수험번호를 찾는 `trace`, 프로파일과 검증 상태를 보여주는 `profile`이 동작한다. 클라우드 모델(OpenAI, Anthropic, Google) 연결도 들어 있지만 실제 키로 호출해 본 적은 없다. 실제 AI 모델로 잰 점수는 아직 없고, 지금 있는 수치는 텍스트 추출과 OCR 기준선뿐이다.
+> 무료 범위(Phase 1~5)는 모두 만들었다. 다만 실제 AI 모델로 검증한 프로파일이 아직 없어서 `protect`는 모든 `a-` 프로파일에 경고를 낸다. 유료 플랜은 계획중이다.
 
 **바로 가기:** [빠른 시작](#빠른-시작) · [**사용법**](USAGE.md) · [설치](#설치) · [로드맵](#로드맵) · [명세](spec/README.md) · [English](README.en.md)
 
@@ -40,7 +40,7 @@
 | `examshield auth` — API 키를 OS 키체인에 보관 | 완료 (테스트용 키체인으로만 테스트, 실제 OS 키체인에는 써 보지 않음) |
 | 클라우드 모델 검증 (본인 키 사용, 기본값 꺼짐), 호출 전 확인, `--offline` | 완료 (각 사 SDK를 가짜 서버에 붙여서만 테스트, 실제 호출은 해 보지 않음) |
 | 수험번호별 추적 워터마크, `--copies`, `examshield trace` | 완료 (PDF와 화면 캡처 수준 그림에서 복원. 실제 화면 캡처가 아니라 PDF를 그림으로 바꾼 것으로 확인) |
-| 모델 드리프트 경고, `examshield profile` | 예정 (Phase 5) |
+| 모델 드리프트 경고(검증이 없거나 30일 넘었거나 기준 미달이면 `protect`가 경고), `examshield profile list\|show` | 완료 (실제 AI로 잰 검증 기록은 아직 없음) |
 | 시나리오 B(인쇄 시험) 프로파일, 촬영 사진에서 워터마크 복원 | 계획중 (유료) |
 | 폐쇄망용 단일 실행 파일, 상용 라이선스, 검증된 프로파일 구독 | 계획중 (유료) |
 
@@ -51,6 +51,7 @@
 - **같은 입력이면 같은 출력**: 입력, 프로파일, 시드가 같으면 복사본이 바이트 단위로 같다.
 - **검증 대상은 문서가 아니라 프로파일**: `verify`는 내장된 공개 문항 세트에 프로파일을 적용해 측정한다. 실제 시험지는 클라우드로 보내지 않는다.
 - **API 키는 사용자 것**: 클라우드 검증은 선택 사항이다. 키는 환경변수나 OS 키체인에서 읽고, 평문 파일에 쓰지 않는다.
+- **효과에는 유효기간이 있다**: 검증 결과는 그날 그 모델을 상대로 잰 값이다. `protect`는 프로파일의 최신 검증 리포트를 찾아, 없거나 30일이 넘었거나 기준에 못 미치면 경고한다. 경고는 복사본을 막지 않는다.
 
 보안 요구사항 전체는 [spec/05-security.md](spec/05-security.md)에 있다.
 
@@ -71,7 +72,7 @@ cd Gotcha
 uv sync
 ```
 
-명령이 구현되면 다음처럼 설치할 수 있게 할 예정이다.
+PyPI에는 아직 올리지 않았다. 올리면 다음처럼 설치할 수 있게 할 예정이다.
 
 ```bash
 uv tool install examshield
@@ -102,11 +103,11 @@ tesseract-eng  이미지         변환본  40.4%        -       -            0
 
 텍스트 레이어를 추출하면 원문의 21.5%만 맞는다. 쪽을 그림으로 읽는 경로(Tesseract)는 대조군과 변환본이 같다. 이 프로파일은 그림으로 읽는 AI를 막지 못한다는 뜻이다. Tesseract 수치 자체가 낮은 것은 문항이 한국어인데 한국어 데이터가 없어서다.
 
-프로파일은 `none`, `a-rasterize`, `a-glyph-remap`, `a-decoy`, `a-remap-decoy`가 있다. 네 가지 `a-` 프로파일은 모두 `experimental`이다. 효과를 실제 AI로 확인하지 않았다.
+프로파일 목록과 검증 상태는 `uv run examshield profile list`로 본다. `a-` 프로파일 여섯 가지는 모두 `experimental`이다. 효과를 실제 AI로 확인하지 않았다.
 
 ## 사용법
 
-명령별 설명은 **[USAGE.md](USAGE.md)**에 있다. 아직 없는 명령의 설계는 [spec/06-commands.md](spec/06-commands.md)에 있다.
+명령별 설명은 **[USAGE.md](USAGE.md)**에 있다. 명령의 원래 설계는 [spec/06-commands.md](spec/06-commands.md)에 있다.
 
 ### 이 저장소 개발하기
 
@@ -147,6 +148,9 @@ git config core.hooksPath .githooks
 - `--models mock`의 `mock-reader`는 실제 AI가 아니다. 측정 파이프라인을 점검하는 용도다.
 - 명세의 0단계(타당성 실험)는 하지 않았다. 실제 AI 모델과 API 키가 필요하다. `verify`로 돌릴 수 있다.
 - 최신 멀티모달 AI에는 교란 폰트, 색 대비 왜곡, 방해선이 거의 효과가 없다는 연구가 있다. 어떤 기법도 통하지 않으면 방향을 "미끼 + 추적"으로 좁힌다 ([spec/12-risks.md](spec/12-risks.md)).
+- 프로파일의 검증 기록이 하나도 없다. 실제 AI 모델로 `verify`를 돌린 적이 없기 때문이다. 그래서 드리프트 경고는 만든 리포트로만 테스트했다.
+- 드리프트 판정 기준(AI 모델마다 가장 잘 풀린 경로에서 변환본 정답률이 대조군의 절반 이하)과 30일은 명세에 숫자가 없어 임의로 정한 값이다. 문항이 12개라 한두 문항 차이로 판정이 바뀔 수 있다.
+- 기준에 못 미친 프로파일을 `deprecated`로 바꾸는 일은 자동이 아니다. `protect`가 바꿔야 한다고 경고하고, 사람이 프로파일 YAML을 고친다.
 - 안전 훅은 명령 문자열을 대조하는 안전망이다. 감싸거나 돌려 쓴 명령은 빠져나갈 수 있다.
 
 ## 유료 플랜 (계획중)
@@ -175,13 +179,13 @@ git config core.hooksPath .githooks
 ```
 Gotcha/
 ├── examshield/
-│   ├── cli.py         # Typer 진입점: protect, check, verify, report, auth, trace
-│   ├── protect/       # pipeline, techniques/(rasterize, glyph_remap, decoy)
+│   ├── cli.py         # Typer 진입점: protect, check, verify, report, auth, trace, profile
+│   ├── protect/       # pipeline, copies, techniques/(rasterize, glyph_remap, decoy, watermark)
 │   ├── check/         # compare: 구조, 텍스트, 렌더링, OCR 비교
 │   ├── trace/         # detect: 유출본을 원본에 맞추고 수험번호 무늬를 찾는다
 │   ├── benchmark/     # 문항 세트 (v1)와 PDF 렌더링
-│   ├── profiles/      # 프로파일 YAML: none, none-print, a-*
-│   ├── verify/        # runner, capture_sim, metrics, report, models/
+│   ├── profiles/      # 프로파일 YAML: none, none-print, a-*. verified/에 최신 검증 기록
+│   ├── verify/        # runner, capture_sim, metrics, report, drift, models/
 │   ├── auth/          # keys: 환경변수와 OS 키체인에서 API 키 찾기
 │   ├── providers.py   # 클라우드 제공사 목록: 키 이름, 기본 모델, 접속 주소
 │   ├── netguard.py    # 오프라인 설정일 때 네트워크 거부
@@ -210,7 +214,7 @@ Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간�
 - [x] **Phase 2** — `protect` + `check`, 시나리오 A 프로파일(이미지화, 글리프 매핑 변조, 숨은 미끼). 완료 기준: 결정적 출력, 네트워크 0건 테스트 통과
 - [x] **Phase 3** — `auth`, 클라우드 모델 검증, `--offline`. 완료 기준: 키 없이 실행하면 안내 후 종료, 호출 전 확인 절차 동작
 - [x] **Phase 4** — 추적 워터마크, `--copies`, `trace`. 완료 기준: PDF와 화면 캡처 수준 이미지에서 수험번호 복원
-- [ ] **Phase 5** — 모델 드리프트 경고, `report`, `profile`, 문서 마무리. 완료 기준: 전체 테스트 통과
+- [x] **Phase 5** — 모델 드리프트 경고, `report`, `profile`, 문서 마무리. 완료 기준: 전체 테스트 통과
 - [ ] **Phase 6** — 시나리오 B 인쇄용 프로파일, 실제 인쇄·촬영 보정, 촬영 사진에서 워터마크 복원 (계획중, 유료)
 - [ ] **Phase 7** — 폐쇄망용 단일 실행 파일, 상용 라이선스, 프로파일 구독, 웹 UI, HWP 입력 (계획중, 유료)
 

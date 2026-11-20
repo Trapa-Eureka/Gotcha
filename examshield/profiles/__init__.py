@@ -36,7 +36,8 @@ def list_profile_names() -> list[str]:
 
 def load_profile(name: str) -> Profile:
     path = PROFILE_DIR / f"{name}.yaml"
-    if not path.is_file():
+    # 이름을 경로로 쓰기 전에 목록과 대조한다. '../x'나 절대 경로가 다른 파일을 가리키지 못한다.
+    if name not in list_profile_names():
         known = ", ".join(list_profile_names())
         raise ExamShieldError(f"프로파일 '{name}'을(를) 찾지 못했다. 있는 프로파일: {known}")
     data: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
