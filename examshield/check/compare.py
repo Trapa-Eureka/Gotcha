@@ -133,6 +133,7 @@ def compare(
         raise ExamShieldError("작업 기록의 미끼 수가 쪽수와 다르다.")
 
     text_same = True
+    redrawn: list[int] = []
     max_diff = 0
     changed = 0
     total = 0
@@ -159,6 +160,8 @@ def compare(
                 f"{number}쪽: 덧씌운 무늬가 워터마크 격자 모양이 아니다. 다른 내용이 옅게 들어갔을 수 있다"
             )
         page_max = int(delta.max())
+        if page_max:
+            redrawn.append(number - 1)
         max_diff = max(max_diff, page_max)
         changed += int((delta > expect.pixel_tolerance).sum())
         total += int(delta.size)
@@ -173,7 +176,7 @@ def compare(
         result.text = "identical_without_decoys" if expect.decoys else "identical"
     elif expect.text == TEXT_ALTERED:
         result.text = "altered_as_expected"
-        _compare_by_ocr(source, target, dpi, ocr, result)
+        _compare_by_ocr(source, target, redrawn, dpi, ocr, result)
     else:
         result.text = "different"
         result.notes.append(
@@ -234,14 +237,22 @@ def _compare_images(
 
 
 def _compare_by_ocr(
-    source: Any, target: Any, dpi: int, ocr: Ocr | None, result: CheckResult
+    source: Any, target: Any, pages: list[int], dpi: int, ocr: Ocr | None, result: CheckResult
 ) -> None:
+    """렌더링이 원본과 조금이라도 다른 쪽만 OCR로 읽어 비교한다.
+
+    픽셀이 모두 같은 쪽은 OCR이 읽는 글자도 같으므로 읽지 않는다. OCR이 검사 시간의 대부분이다.
+    """
+    if not pages:
+        result.notes.append("렌더링이 원본과 픽셀 단위로 같아 OCR 비교는 생략했다.")
+        return
     if ocr is None:
         result.notes.append("OCR 비교는 건너뛰었다(Tesseract 없음). 렌더링 비교로만 판정했다.")
         return
     before_scores: list[float] = []
     after_scores: list[float] = []
-    for before, after in zip(source, target, strict=True):
+    for index in pages:
+        before, after = source[index], target[index]
         truth = page_text(before)
         left = encode_png(render_gray(before, dpi))
         right = encode_png(render_gray(after, dpi))
@@ -249,7 +260,11 @@ def _compare_by_ocr(
         before_scores.append(score)
         after_scores.append(score if left == right else legibility(ocr(right), truth))
     original_score, copy_score = mean(before_scores) or 0.0, mean(after_scores) or 0.0
-    result.ocr = {"original": round(original_score, 4), "copy": round(copy_score, 4)}
+    result.ocr = {
+        "original": round(original_score, 4),
+        "copy": round(copy_score, 4),
+        "pages": len(pages),
+    }
     if copy_score < original_score - OCR_TOLERANCE:
         result.differences.append(
             f"OCR 판독률이 원본보다 낮다 (원본 {original_score:.1%}, 복사본 {copy_score:.1%})"
@@ -276,6 +291,7 @@ def format_result(result: CheckResult) -> str:
     if result.ocr:
         lines.append(
             f"OCR 판독률   원본 {result.ocr['original']:.1%}, 복사본 {result.ocr['copy']:.1%}"
+            + (f" (렌더링이 달라진 {result.ocr['pages']}쪽)" if "pages" in result.ocr else "")
         )
     lines += [f"차이: {entry}" for entry in result.differences]
     lines += [f"참고: {entry}" for entry in result.notes]

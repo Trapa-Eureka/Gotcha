@@ -5,7 +5,7 @@ import pymupdf
 import pytest
 from typer.testing import CliRunner
 
-from examshield.check.compare import Expectation, compare
+from examshield.check.compare import Expectation, compare, format_result
 from examshield.cli import app
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, save_deterministic
@@ -122,8 +122,43 @@ def test_a_tampered_rasterized_copy_fails(sample_pdf: bytes) -> None:
     assert not result.passed
 
 
-def test_ocr_is_used_when_the_text_layer_is_scrambled(sample_pdf: bytes) -> None:
+def test_ocr_is_skipped_when_every_page_renders_identically(sample_pdf: bytes) -> None:
+    protected = protect_bytes(sample_pdf, load_profile("a-remap-decoy"))
+    calls: list[int] = []
+
+    def fake_ocr(image: bytes) -> str:
+        calls.append(len(image))
+        return ""
+
+    result = compare(sample_pdf, protected.pdf, protected.expectation, fake_ocr)
+
+    assert result.passed and result.text == "altered_as_expected"
+    assert result.visual_max_diff == 0
+    assert calls == [] and result.ocr is None
+    assert any("OCR 비교는 생략" in note for note in result.notes)
+    assert not any("Tesseract 없음" in note for note in result.notes)
+
+
+def test_only_the_pages_that_render_differently_are_read_by_ocr(sample_pdf: bytes) -> None:
     protected = protect_bytes(sample_pdf, load_profile("a-glyph-remap"))
+    doc = open_pdf_bytes(protected.pdf)
+    # 둘째 쪽에만 허용치 안의 옅은 점을 찍는다.
+    doc[1].draw_rect(pymupdf.Rect(300, 700, 302, 702), color=None, fill=(0.995, 0.995, 0.995))
+    truth = open_pdf_bytes(sample_pdf)[1].get_text()
+    replies = iter([truth, ""])
+
+    result = compare(
+        sample_pdf, save_deterministic(doc), protected.expectation, lambda _: next(replies)
+    )
+
+    assert result.visual_max_diff is not None and 0 < result.visual_max_diff <= 2
+    assert result.ocr == {"original": 1.0, "copy": 0.0, "pages": 1}
+    assert any("OCR 판독률이 원본보다 낮다" in entry for entry in result.differences)
+    assert "렌더링이 달라진 1쪽" in format_result(result)
+
+
+def test_ocr_is_used_when_the_text_layer_is_scrambled(sample_pdf: bytes) -> None:
+    protected = protect_bytes(sample_pdf, load_profile("a-full"), None, b"k" * 16)
     calls: list[int] = []
 
     def fake_ocr(image: bytes) -> str:
@@ -134,7 +169,7 @@ def test_ocr_is_used_when_the_text_layer_is_scrambled(sample_pdf: bytes) -> None
 
     assert result.text == "altered_as_expected"
     assert result.ocr is not None and result.ocr["original"] == result.ocr["copy"]
-    assert len(calls) == 3
+    assert result.ocr["pages"] == 3 and len(calls) == 6
 
 
 def test_a_copy_that_ocr_reads_worse_fails(sample_pdf: bytes) -> None:
@@ -151,7 +186,7 @@ def test_a_copy_that_ocr_reads_worse_fails(sample_pdf: bytes) -> None:
 
 
 def test_missing_ocr_is_reported_not_hidden(sample_pdf: bytes) -> None:
-    protected = protect_bytes(sample_pdf, load_profile("a-glyph-remap"))
+    protected = protect_bytes(sample_pdf, load_profile("a-full"), None, b"k" * 16)
     result = compare(sample_pdf, protected.pdf, protected.expectation, None)
 
     assert result.passed
