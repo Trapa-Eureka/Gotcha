@@ -1,0 +1,10 @@
+name: a-remap-decoy-num
+scenario: A
+status: experimental
+description: a-remap-decoy와 같지만 숫자는 섞지 않는다. 복사하거나 추출한 텍스트에서 문항 번호가 그대로 읽혀서, 문항 번호를 말하는 미끼(정답표에 문항 번호를 적었을 때)가 제 문항에 맞아떨어진다. 대신 본문의 숫자(연도, 수치)도 그대로 읽힌다. Claude로 재 보니 미끼를 더 따랐지만(36문항 중 17, 숫자를 섞으면 4) 정답률이 5.6%에서 19.4%로 올랐다(2026-11-21). 화면 캡처나 파일 올리기로 읽는 AI는 막지 못한다.
+blocks: [text]
+techniques:
+  - id: glyph_remap
+    params:
+      keep: [digit]
+  - id: decoy

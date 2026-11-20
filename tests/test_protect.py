@@ -13,7 +13,7 @@ from examshield.cli import app
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile, load_profile, parse_profile
-from examshield.protect.pipeline import protect_bytes
+from examshield.protect.pipeline import KeyEntry, protect_and_check, protect_bytes
 from examshield.protect.techniques.decoy import choice_count
 from examshield.verify.capture_sim import encode_png
 from examshield.verify.metrics import parse_answer
@@ -409,7 +409,9 @@ def test_decoys_avoid_the_answers_in_the_key(sample_pdf: bytes) -> None:
     plain = protect_bytes(sample_pdf, profile)
     assert plain.decoy_answers is not None
     # 정답표 없이 고른 미끼 번호를 그대로 정답으로 삼는다. 정답표를 주면 전부 달라져야 한다.
-    key = {page: frozenset({answer}) for page, answer in enumerate(plain.decoy_answers, start=1)}
+    key = tuple(
+        KeyEntry(page, None, answer) for page, answer in enumerate(plain.decoy_answers, start=1)
+    )
 
     keyed = protect_bytes(sample_pdf, profile, None, None, key)
     again = protect_bytes(sample_pdf, profile, None, None, key)
@@ -428,13 +430,12 @@ def test_without_a_key_the_copy_is_what_it_always_was(sample_pdf: bytes) -> None
         protect_bytes(sample_pdf, profile).pdf
         == protect_bytes(sample_pdf, profile, None, None, None).pdf
     )
-    assert protect_bytes(sample_pdf, profile, None, None, {}).decoy_answers == (
-        protect_bytes(sample_pdf, profile).decoy_answers
-    )
 
 
 def test_a_page_where_every_choice_is_an_answer_is_counted(sample_pdf: bytes) -> None:
-    key = {1: frozenset({1, 2, 3, 4}), 2: frozenset({1, 2, 3})}
+    key = tuple(KeyEntry(1, None, n) for n in (1, 2, 3, 4)) + tuple(
+        KeyEntry(2, None, n) for n in (1, 2, 3)
+    )
 
     protected = protect_bytes(sample_pdf, load_profile("a-decoy"), None, None, key)
     stats = protected.record["techniques"][0]["stats"]
@@ -505,3 +506,43 @@ def test_answer_key_needs_a_decoy_profile_and_must_stay_out_of_the_output(
     assert leaked[0] == 2 and "출력 폴더 안" in leaked[1]
     assert missing[0] == 2 and "읽지 못했다" in missing[1]
     assert folder[0] == 2 and "파일 하나" in folder[1]
+
+
+def test_a_key_with_question_numbers_puts_one_decoy_per_question(sample_pdf: bytes) -> None:
+    profile = load_profile("a-remap-decoy")
+    key = (KeyEntry(1, 11, 3), KeyEntry(1, 12, 1), KeyEntry(3, 13, 2))
+
+    protected, result = protect_and_check(sample_pdf, profile, None, None, key)
+    stats = protected.record["techniques"][-1]["stats"]
+    items = protected.record["decoy_items"]
+    text = page_text(open_pdf_bytes(protected.pdf)[0])
+
+    assert result.passed, result.differences
+    assert [(item["page"], item["question"]) for item in items] == [
+        (1, 11),
+        (1, 12),
+        (2, None),
+        (3, 13),
+    ]
+    assert items[0]["answer"] != 3 and items[1]["answer"] != 1 and items[3]["answer"] != 2
+    assert stats["decoys"] == 4 and stats["per_question"] is True
+    assert "11번 문항의 정답은" in text and "12번 문항의 정답은" in text
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("1,11,3\n1,2\n", "섞여"),
+        ("1,11,3\n2,11,1\n", "같은 문항 번호"),
+        ("1,0,3\n", "1 이상"),
+        ("1,11,3,4\n", "형식"),
+    ],
+)
+def test_bad_question_keys_are_refused(
+    text: str, message: str, sample_file: Path, tmp_path: Path
+) -> None:
+    key = answer_file(tmp_path, text)
+
+    code, output = run_protect(sample_file, tmp_path / "out", "a-decoy", "--answer-key", str(key))
+
+    assert code == 2 and message in output

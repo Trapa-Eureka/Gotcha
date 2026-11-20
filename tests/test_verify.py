@@ -7,17 +7,19 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from examshield.benchmark import load_items
+from examshield.benchmark import load_items, render_items_pdf
 from examshield.cli import app
 from examshield.errors import ExamShieldError
+from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import load_profile, parse_profile
-from examshield.protect.pipeline import protect_bytes
+from examshield.protect.pipeline import KeyEntry, protect_bytes
 from examshield.verify.drift import record_refusal
-from examshield.verify.models.base import ModelClient
+from examshield.verify.metrics import parse_answers
+from examshield.verify.models.base import ModelClient, PageInput, prompt_of, read_reply
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.mock import MockModel
 from examshield.verify.report import format_report, load_report, write_report
-from examshield.verify.runner import Skipped, run_verification
+from examshield.verify.runner import Skipped, builtin_subject, run_verification
 
 NOW = datetime(2026, 11, 20, 9, 0, 0, tzinfo=UTC)
 REQUIRED_REPORT_KEYS = {
@@ -285,3 +287,110 @@ def test_avoid_answers_cannot_be_recorded_or_used_with_a_custom_file(
     custom = CliRunner().invoke(app, [*base, "--avoid-answers", "--allow-custom", str(sample_file)])
 
     assert custom.exit_code == 2 and "내장 문항" in custom.stderr
+
+
+def test_benchmark_v2_puts_four_items_on_a_page() -> None:
+    items = load_items("v2")
+    pdf = render_items_pdf(items.items, items.per_page)
+    doc = open_pdf_bytes(pdf)
+
+    assert (len(items.items), items.per_page, doc.page_count) == (36, 4, 9)
+    assert [item.number for item in items.pages[1]] == [5, 6, 7, 8]
+    assert all(1 <= item.answer <= 4 and len(item.choices) == 4 for item in items.items)
+    assert len({item.question for item in items.items}) == 36
+    assert "5. " in page_text(doc[1]) and "8. " in page_text(doc[1])
+    assert load_items().per_page == 1
+
+
+def test_numbered_answers_are_read_per_question() -> None:
+    reply = "본문\n정답 5: 3\n정답 6번: ②\n정답 7 : 9\n정답 99: 1\n정답 5: 4"
+
+    assert parse_answers(reply, (5, 6, 7, 8), 4) == {5: 4, 6: 2}
+    page = PageInput(text="", image_png=b"", choice_count=4, questions=(5, 6))
+    assert read_reply(reply, page).answers == {5: 4, 6: 2}
+    assert read_reply(reply, page).transcription == "본문"
+    assert "문항 5, 6이(가) 차례로 있다" in prompt_of(page)
+    assert "문항 한 개" in prompt_of(PageInput(text="", image_png=b"", choice_count=4))
+
+
+def run_v2(profile_name: str, *, numbered: bool, keyed: bool = True) -> dict[str, Any]:
+    items = load_items("v2")
+    subject = builtin_subject(items)
+    profile = load_profile(profile_name)
+    key = tuple(
+        KeyEntry(page, number if numbered else None, answer)
+        for page, truth in enumerate(subject.truths, start=1)
+        for number, answer in truth.questions
+    )
+    report = run_verification(
+        profile,
+        subject,
+        [MockModel(items.items)],
+        now=NOW,
+        transform=lambda pdf: protect_bytes(pdf, profile, None, None, key if keyed else None),
+    )
+    return {row["variant"]: row for row in report["results"]}
+
+
+def test_multi_question_pages_are_scored_per_question() -> None:
+    rows = run_v2("a-remap-decoy", numbered=True)
+
+    assert rows["control"]["items"] == 9 and rows["control"]["questions"] == 36
+    assert rows["control"]["accuracy"] == 1.0
+    # 모의 모델은 문항을 가리키는 미끼를 그대로 따른다. 미끼가 정답을 피하므로 하나도 못 맞힌다.
+    assert rows["protected"]["accuracy"] == 0.0
+    assert rows["protected"]["decoy_hit_rate"] == 1.0 and rows["protected"]["decoy_items"] == 36
+
+
+def test_a_page_level_decoy_is_counted_for_every_question_on_the_page() -> None:
+    rows = run_v2("a-remap-decoy", numbered=False)
+
+    # 쪽마다 미끼가 하나다. 모의 모델은 그 번호를 그 쪽의 모든 문항에 답한다. 한 쪽의 네 문항이
+    # 네 번호를 모두 정답으로 쓰는 쪽에서는 미끼가 정답을 피할 수 없어서, 그 쪽에서 한 문항씩 맞힌다.
+    assert 0.0 < rows["protected"]["accuracy"] < 0.25
+    assert rows["protected"]["decoy_hit_rate"] == 1.0
+    assert rows["protected"]["decoy_items"] == round(36 * (1 - rows["protected"]["accuracy"]))
+
+
+def test_keeping_digits_leaves_question_numbers_readable(sample_pdf: bytes) -> None:
+    scrambled = page_text(
+        open_pdf_bytes(protect_bytes(sample_pdf, load_profile("a-remap-decoy")).pdf)[1]
+    )
+    kept = page_text(
+        open_pdf_bytes(protect_bytes(sample_pdf, load_profile("a-remap-decoy-num")).pdf)[1]
+    )
+    original = page_text(open_pdf_bytes(sample_pdf)[1])
+    body = kept.split("제시한다.")[-1]
+
+    assert original.lstrip().startswith("2. ")
+    assert body.lstrip().startswith("2. ")
+    assert not scrambled.split("제시한다.")[-1].lstrip().startswith("2. ")
+    assert "대한민국" not in kept
+    assert load_profile("a-remap-decoy-num").sha256 != load_profile("a-remap-decoy").sha256
+
+
+def test_bad_keep_values_are_refused(sample_pdf: bytes) -> None:
+    for keep in (["number"], "digit"):
+        profile = parse_profile(
+            {
+                "name": "x",
+                "scenario": "A",
+                "status": "experimental",
+                "techniques": [{"id": "glyph_remap", "params": {"keep": keep}}],
+            }
+        )
+        with pytest.raises(ExamShieldError, match="keep"):
+            protect_bytes(sample_pdf, profile)
+
+
+def test_cli_measures_benchmark_v2_and_refuses_to_record_it(tmp_path: Path) -> None:
+    base = ["verify", "--profile", "a-remap-decoy-num", "--models", "mock", "--out", str(tmp_path)]
+
+    result = CliRunner().invoke(app, [*base, "--benchmark", "v2", "--question-decoys"])
+    recorded = CliRunner().invoke(app, [*base, "--benchmark", "v2", "--record"])
+    unknown = CliRunner().invoke(app, [*base, "--benchmark", "v9"])
+    report = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+
+    assert result.exit_code == 0, result.output
+    assert report["benchmark"]["version"] == "v2" and report["benchmark"]["item_count"] == 9
+    assert recorded.exit_code == 2 and unknown.exit_code == 2

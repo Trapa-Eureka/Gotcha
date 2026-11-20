@@ -1,0 +1,150 @@
+version: v2
+source: 이 프로젝트가 직접 쓴 더미 문항. 기출문제를 쓰지 않았다. v1의 12문항에 24문항을 더했다.
+choices_per_item: 4
+# 한 쪽에 문항을 넷씩 넣는다. 한 쪽에 문항이 여럿인 실제 시험지처럼 재려는 것이다.
+per_page: 4
+items:
+  - id: v2-01
+    question: 물이 1기압에서 끓는 온도는 섭씨 몇 도인가?
+    choices: ["50도", "80도", "100도", "120도"]
+    answer: 3
+  - id: v2-02
+    question: 대한민국의 수도는 어디인가?
+    choices: ["서울", "부산", "인천", "대전"]
+    answer: 1
+  - id: v2-03
+    question: 삼각형의 세 내각의 합은 몇 도인가?
+    choices: ["90도", "180도", "270도", "360도"]
+    answer: 2
+  - id: v2-04
+    question: 태양계에서 태양에 가장 가까운 행성은 무엇인가?
+    choices: ["금성", "지구", "화성", "수성"]
+    answer: 4
+  - id: v2-05
+    question: 한글을 창제한 조선의 임금은 누구인가?
+    choices: ["태조", "세종", "영조", "정조"]
+    answer: 2
+  - id: v2-06
+    question: 12 곱하기 12의 값은 얼마인가?
+    choices: ["124", "132", "144", "156"]
+    answer: 3
+  - id: v2-07
+    question: 식물이 광합성을 할 때 흡수하는 기체는 무엇인가?
+    choices: ["이산화탄소", "산소", "질소", "수소"]
+    answer: 1
+  - id: v2-08
+    question: 1시간은 몇 초인가?
+    choices: ["60초", "600초", "1800초", "3600초"]
+    answer: 4
+  - id: v2-09
+    question: 다음 중 소수(prime number)인 것은 무엇인가?
+    choices: ["21", "27", "29", "33"]
+    answer: 3
+  - id: v2-10
+    question: 지구의 자연 위성은 무엇인가?
+    choices: ["달", "포보스", "타이탄", "유로파"]
+    answer: 1
+  - id: v2-11
+    question: 영어 단어 library의 뜻으로 알맞은 것은 무엇인가?
+    choices: ["병원", "도서관", "우체국", "경찰서"]
+    answer: 2
+  - id: v2-12
+    question: 원소 기호 Fe가 나타내는 원소는 무엇인가?
+    choices: ["금", "은", "구리", "철"]
+    answer: 4
+  - id: v2-13
+    question: 1년은 몇 개월인가?
+    choices: ["10개월", "11개월", "12개월", "13개월"]
+    answer: 3
+  - id: v2-14
+    question: 무지개의 색은 보통 몇 가지로 말하는가?
+    choices: ["5가지", "6가지", "7가지", "8가지"]
+    answer: 3
+  - id: v2-15
+    question: 대한민국의 국화는 무엇인가?
+    choices: ["무궁화", "장미", "벚꽃", "국화"]
+    answer: 1
+  - id: v2-16
+    question: 정사각형의 변은 몇 개인가?
+    choices: ["3개", "4개", "5개", "6개"]
+    answer: 2
+  - id: v2-17
+    question: 물의 화학식은 무엇인가?
+    choices: ["CO2", "H2O", "O2", "NaCl"]
+    answer: 2
+  - id: v2-18
+    question: 영어 단어 water의 뜻으로 알맞은 것은 무엇인가?
+    choices: ["불", "흙", "바람", "물"]
+    answer: 4
+  - id: v2-19
+    question: 100의 절반은 얼마인가?
+    choices: ["25", "40", "50", "75"]
+    answer: 3
+  - id: v2-20
+    question: 사람의 심장이 주로 하는 일은 무엇인가?
+    choices: ["피를 온몸으로 보낸다", "음식을 소화한다", "숨을 쉰다", "소리를 듣는다"]
+    answer: 1
+  - id: v2-21
+    question: 일주일은 며칠인가?
+    choices: ["5일", "6일", "7일", "8일"]
+    answer: 3
+  - id: v2-22
+    question: 세계에서 가장 넓은 바다는 무엇인가?
+    choices: ["대서양", "인도양", "북극해", "태평양"]
+    answer: 4
+  - id: v2-23
+    question: 조선을 세운 임금은 누구인가?
+    choices: ["이성계", "왕건", "주몽", "박혁거세"]
+    answer: 1
+  - id: v2-24
+    question: 7 더하기 8의 값은 얼마인가?
+    choices: ["13", "14", "15", "16"]
+    answer: 3
+  - id: v2-25
+    question: 지구가 태양 주위를 한 바퀴 도는 데 걸리는 시간은 약 얼마인가?
+    choices: ["하루", "한 달", "일 년", "십 년"]
+    answer: 3
+  - id: v2-26
+    question: 다음 중 포유류인 것은 무엇인가?
+    choices: ["고래", "상어", "참새", "개구리"]
+    answer: 1
+  - id: v2-27
+    question: 원의 둘레를 지름으로 나눈 값에 가장 가까운 것은 무엇인가?
+    choices: ["2.14", "3.14", "4.14", "5.14"]
+    answer: 2
+  - id: v2-28
+    question: 영어 단어 teacher의 뜻으로 알맞은 것은 무엇인가?
+    choices: ["학생", "의사", "요리사", "선생님"]
+    answer: 4
+  - id: v2-29
+    question: 얼음이 녹으면 무엇이 되는가?
+    choices: ["수증기", "물", "소금", "모래"]
+    answer: 2
+  - id: v2-30
+    question: 대한민국에서 가장 큰 섬은 어디인가?
+    choices: ["울릉도", "거제도", "강화도", "제주도"]
+    answer: 4
+  - id: v2-31
+    question: 9 곱하기 9의 값은 얼마인가?
+    choices: ["72", "81", "90", "99"]
+    answer: 2
+  - id: v2-32
+    question: 식물의 뿌리가 주로 하는 일은 무엇인가?
+    choices: ["물과 양분을 흡수한다", "꽃가루를 옮긴다", "씨를 퍼뜨린다", "빛을 낸다"]
+    answer: 1
+  - id: v2-33
+    question: 3·1 운동이 일어난 해는 언제인가?
+    choices: ["1910년", "1919년", "1945년", "1950년"]
+    answer: 2
+  - id: v2-34
+    question: 다음 중 짝수인 것은 무엇인가?
+    choices: ["7", "9", "11", "12"]
+    answer: 4
+  - id: v2-35
+    question: 공기 중에 가장 많은 기체는 무엇인가?
+    choices: ["질소", "산소", "이산화탄소", "수소"]
+    answer: 1
+  - id: v2-36
+    question: 영어 단어 Monday가 뜻하는 요일은 무엇인가?
+    choices: ["일요일", "화요일", "월요일", "금요일"]
+    answer: 3

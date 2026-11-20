@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import re
 from collections.abc import Iterator
@@ -7,19 +8,23 @@ from pathlib import Path
 
 from examshield.check.compare import CheckResult, Expectation, Ocr, compare
 from examshield.errors import ExamShieldError
+from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile
 from examshield.protect.pipeline import (
     KEYED,
     TECHNIQUES,
     AnswerKey,
     Protected,
+    decoy_items_record,
+    key_for_pages,
     protect_bytes,
     sha256_hex,
 )
-from examshield.protect.techniques import dots, watermark
-from examshield.protect.techniques.base import Context
+from examshield.protect.techniques import decoy, dots, watermark
+from examshield.protect.techniques.base import Context, Outcome
 
 WATERMARK = "watermark"
+DECOY = "decoy"
 DOTS = "dots"
 MAP_COLUMNS = ("examinee_id", "code", "file", "output_sha256", "cell_pt", "kind")
 CELL_RANGES = {WATERMARK: watermark.CELL_RANGE, DOTS: dots.CELL_RANGE}
@@ -96,6 +101,11 @@ class Copy:
     check: CheckResult
 
 
+def decoy_seed(key: bytes, input_sha256: str) -> bytes:
+    """수험번호마다 다른 미끼 번호를 고르는 시드."""
+    return hashlib.sha256(b"examshield-decoy\x00" + key + input_sha256.encode()).digest()
+
+
 def protect_copies(
     pdf: bytes,
     profile: Profile,
@@ -104,53 +114,93 @@ def protect_copies(
     ocr: Ocr | None = None,
     answer_key: AnswerKey | None = None,
 ) -> tuple[CheckResult, Iterator[Copy]]:
-    """워터마크 전 단계는 한 번만 만들고 검사한다. 그 위에 수험번호별 무늬만 따로 덧씌운다."""
+    """수험번호와 무관한 단계는 한 번만 만들고 검사한다. 그 위에 수험번호별 미끼와 무늬를 얹는다.
+
+    미끼 번호도 수험번호마다 다르게 고른다. 그래야 미끼를 따른 답안을 베낀 응시자와, 자기 복사본을
+    AI에 넣은 응시자를 가릴 수 있다. 미끼가 맨 마지막(무늬 바로 앞) 기법일 때만 그렇게 한다.
+    """
     kind, params = keyed_technique(profile)
-    base_profile = replace(
-        profile, techniques=tuple(e for e in profile.techniques if e.id not in KEYED)
-    )
-    base = protect_bytes(pdf, base_profile, seed, None, answer_key)
+    plain = [entry for entry in profile.techniques if entry.id not in KEYED]
+    personal = bool(plain) and plain[-1].id == DECOY
+    shared = plain[:-1] if personal else plain
+    base_profile = replace(profile, techniques=tuple(shared))
+    base = protect_bytes(pdf, base_profile, seed, None, None if personal else answer_key)
     base_check = compare(pdf, base.pdf, base.expectation, ocr)
+    originals = tuple(page_text(page) for page in open_pdf_bytes(pdf))
+    avoid, questions = key_for_pages(answer_key if personal else None, len(originals), profile)
+    input_sha256 = sha256_hex(pdf)
 
     def make() -> Iterator[Copy]:
-        context = Context(seed=b"", original_texts=())
         for examinee_id in examinee_ids:
             key = watermark.derive_key(seed, examinee_id)
-            outcome = TECHNIQUES[kind](base.pdf, params, replace(context, watermark_key=key))
+            current = base.pdf
+            lured: Outcome | None = None
+            if personal:
+                lured = decoy.apply(
+                    current,
+                    plain[-1].params,
+                    Context(
+                        seed=decoy_seed(key, input_sha256),
+                        original_texts=originals,
+                        avoid_answers=avoid,
+                        questions=questions,
+                    ),
+                )
+                current = lured.pdf
+            outcome = TECHNIQUES[kind](
+                current, params, Context(seed=b"", original_texts=(), watermark_key=key)
+            )
             tolerance = outcome.pixel_tolerance or base.expectation.pixel_tolerance
+            texts = lured.decoy_texts if lured is not None and lured.decoy_texts else ()
             overlay = Expectation(
+                decoys=texts,
                 overlay_images=outcome.overlay_images,
                 pixel_tolerance=tolerance,
                 overlay_cell_pt=None if outcome.dots else int(outcome.stats["cell_pt"]),
                 dots_cell_pt=outcome.dots["cell_pt"] if outcome.dots else None,
                 dots_ink=outcome.dots["ink"] if outcome.dots else None,
             )
-            # 무늬를 넣기 전 문서와 비교한다. 달라도 되는 것은 덧씌운 무늬 한 장뿐이다.
+            # 수험번호와 무관한 단계까지 만든 문서와 비교한다. 달라도 되는 것은 기록된 미끼 문구와
+            # 덧씌운 무늬 한 장뿐이다.
             check = compare(base.pdf, outcome.pdf, overlay)
             expectation = replace(
                 base.expectation,
+                decoys=texts if personal else base.expectation.decoys,
                 overlay_images=overlay.overlay_images,
                 pixel_tolerance=overlay.pixel_tolerance,
                 overlay_cell_pt=overlay.overlay_cell_pt,
                 dots_cell_pt=overlay.dots_cell_pt,
                 dots_ink=overlay.dots_ink,
             )
+            answers = lured.decoy_answers if lured is not None else base.decoy_answers
+            items = lured.decoy_items if lured is not None else base.decoy_items
             record = dict(base.record)
             record["techniques"] = [
                 *base.record["techniques"],
+                *(
+                    [{"id": DECOY, "params": plain[-1].params, "stats": lured.stats}]
+                    if lured is not None
+                    else []
+                ),
                 {"id": kind, "params": params, "stats": outcome.stats},
             ]
+            record["profile"] = {"name": profile.name, "sha256": profile.sha256}
             record["output_sha256"] = sha256_hex(outcome.pdf)
             record["expect"] = expectation.as_dict()
             record["check"] = base_check.as_dict()
             record["watermark_check"] = check.as_dict()
+            record["answer_key"] = answer_key is not None
+            record["decoy_answers"] = list(answers) if answers is not None else None
+            record["decoy_items"] = decoy_items_record(items)
+            record["decoys_per_examinee"] = personal
             yield Copy(
                 examinee_id=examinee_id,
                 protected=Protected(
                     pdf=outcome.pdf,
                     record=record,
                     expectation=expectation,
-                    decoy_answers=base.decoy_answers,
+                    decoy_answers=answers,
+                    decoy_items=items,
                 ),
                 check=check,
             )

@@ -426,6 +426,7 @@ def test_profile_list_shows_every_profile_with_its_verification_state(
     lines = {line.split()[0]: line for line in result.stdout.splitlines()}
     assert set(lines) == {
         "이름", "a-decoy", "a-full", "a-glyph-remap", "a-rasterize", "a-remap-decoy",
+        "a-remap-decoy-num",
         "a-watermark", "b-dots", "none", "none-print",
     }  # fmt: skip
     assert "기준 통과" in lines["a-remap-decoy"] and "3일 전" in lines["a-remap-decoy"]

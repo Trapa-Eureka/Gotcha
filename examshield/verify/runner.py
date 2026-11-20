@@ -7,7 +7,7 @@ from typing import Any
 import pymupdf
 
 from examshield import __version__
-from examshield.benchmark import ItemSet, render_items_pdf
+from examshield.benchmark import ItemSet, page_text_of, render_items_pdf
 from examshield.errors import ExamShieldError, ModelAbortError, ModelUnavailableError
 from examshield.pdfio import open_pdf_bytes, page_text, render_gray, save_deterministic
 from examshield.profiles import Profile
@@ -41,6 +41,8 @@ class Truth:
     text: str
     answer: int | None
     choice_count: int
+    # 이 쪽에 있는 문항들의 (번호, 정답). 사용자가 준 파일에는 없다.
+    questions: tuple[tuple[int, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,17 +54,26 @@ class Subject:
     pdf: bytes
     truths: tuple[Truth, ...]
     custom: bool = False
+    # 한 쪽에 문항이 여럿인 문항 세트인지. 그러면 문항마다 답을 받고 문항마다 채점한다.
+    multi: bool = False
 
 
 def builtin_subject(item_set: ItemSet) -> Subject:
+    multi = item_set.per_page > 1
     return Subject(
         version=item_set.version,
         sha256=item_set.sha256,
-        pdf=render_items_pdf(item_set.items),
+        pdf=render_items_pdf(item_set.items, item_set.per_page),
         truths=tuple(
-            Truth(text=item.text, answer=item.answer, choice_count=len(item.choices))
-            for item in item_set.items
+            Truth(
+                text=page_text_of(group),
+                answer=None if multi else group[0].answer,
+                choice_count=max(len(item.choices) for item in group),
+                questions=tuple((item.number, item.answer) for item in group),
+            )
+            for group in item_set.pages
         ),
+        multi=multi,
     )
 
 
@@ -138,11 +149,17 @@ def run_verification(
     channels = chosen_channels(profile, only)
     variants = {CONTROL: subject.pdf}
     decoys: dict[str, tuple[int, ...] | None] = {CONTROL: None}
+    tables: dict[str, dict[tuple[int, int | None], int] | None] = {CONTROL: None}
     protection: dict[str, Any] | None = None
     if transform is not None and profile.techniques:
         protected = transform(subject.pdf)
         variants[PROTECTED] = protected.pdf
         decoys[PROTECTED] = protected.decoy_answers
+        tables[PROTECTED] = (
+            {(page, question): answer for page, question, answer in protected.decoy_items}
+            if protected.decoy_items is not None
+            else None
+        )
         protection = {
             "techniques": protected.record["techniques"],
             "text_layer_similarity": protected.record["text_layer_similarity"],
@@ -159,7 +176,17 @@ def run_verification(
                 if channel not in model.info.channels:
                     continue
                 for variant, inputs in pages.items():
-                    rows.append(_measure(model, channel, variant, inputs, subject, decoys[variant]))
+                    rows.append(
+                        _measure(
+                            model,
+                            channel,
+                            variant,
+                            inputs,
+                            subject,
+                            decoys[variant],
+                            tables[variant],
+                        )
+                    )
         except ModelAbortError as error:
             all_skipped.append(Skipped(model.info.name, str(error)))
             continue
@@ -247,6 +274,7 @@ def _page_inputs(
                 image_png=encode_png(image),
                 choice_count=truth.choice_count,
                 pdf=save_deterministic(single),
+                questions=tuple(number for number, _ in truth.questions) if subject.multi else (),
             )
         )
     return inputs
@@ -259,6 +287,7 @@ def _measure(
     inputs: list[PageInput],
     subject: Subject,
     decoys: tuple[int, ...] | None,
+    table: dict[tuple[int, int | None], int] | None = None,
 ) -> dict[str, Any]:
     scores: list[float] = []
     correct: list[float] = []
@@ -273,6 +302,17 @@ def _measure(
             continue
         refusals += 1 if reply.refused else 0
         scores.append(legibility(reply.transcription, truth.text))
+        if subject.multi:
+            # 문항마다 채점한다. 미끼는 그 문항을 가리키는 것이 있으면 그것을, 없으면 그 쪽의 것을 본다.
+            for number, answer in truth.questions:
+                given = reply.answers.get(number)
+                correct.append(1.0 if given == answer else 0.0)
+                decoy = None
+                if table is not None:
+                    decoy = table.get((index + 1, number), table.get((index + 1, None)))
+                if decoy is not None and decoy != answer:
+                    lured.append(1.0 if given == decoy else 0.0)
+            continue
         if truth.answer is not None:
             correct.append(1.0 if reply.answer == truth.answer else 0.0)
         # 미끼가 우연히 정답을 가리킨 문항은 유도됐는지 알 수 없어 뺀다.
@@ -283,6 +323,7 @@ def _measure(
         "channel": channel,
         "variant": variant,
         "items": len(inputs),
+        "questions": sum(len(truth.questions) or 1 for truth in subject.truths),
         "errors": errors,
         "refusals": refusals,
         "legibility": mean(scores),

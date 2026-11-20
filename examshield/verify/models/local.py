@@ -8,8 +8,15 @@ from urllib.parse import urlsplit
 
 from examshield.errors import ModelUnavailableError, NetworkRefusedError
 from examshield.netguard import OFFLINE_ENV, offline_enabled, require_network
-from examshield.verify.metrics import parse_answer, strip_answer_line
-from examshield.verify.models.base import IMAGE, PROMPT, TEXT, ModelInfo, ModelReply, PageInput
+from examshield.verify.models.base import (
+    IMAGE,
+    TEXT,
+    ModelInfo,
+    ModelReply,
+    PageInput,
+    prompt_of,
+    read_reply,
+)
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
 MODEL_ENV = "EXAMSHIELD_OLLAMA_MODEL"
@@ -80,15 +87,12 @@ class OllamaModel:
             "options": {"temperature": 0, "seed": 0},
         }
         if channel == IMAGE:
-            body["prompt"] = PROMPT
+            body["prompt"] = prompt_of(page)
             body["images"] = [base64.b64encode(page.image_png).decode("ascii")]
         else:
-            body["prompt"] = f"{PROMPT}\n\n---\n{page.text}"
+            body["prompt"] = f"{prompt_of(page)}\n\n---\n{page.text}"
         reply = str(self._call("POST", "/api/generate", body).get("response", ""))
-        return ModelReply(
-            transcription=strip_answer_line(reply),
-            answer=parse_answer(reply, page.choice_count),
-        )
+        return read_reply(reply, page)
 
     def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         url = self._base_url + path

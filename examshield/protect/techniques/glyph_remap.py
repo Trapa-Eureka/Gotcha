@@ -1,6 +1,7 @@
 import re
 from typing import Any
 
+from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, save_deterministic
 from examshield.protect.seed import SeedStream
 from examshield.protect.techniques.base import TEXT_ALTERED, TEXT_PRESERVED, Context, Outcome
@@ -87,7 +88,20 @@ def _class_of(target: bytes) -> str | None:
     return None
 
 
-def scramble(mapping: Mapping, stream: SeedStream) -> tuple[Mapping, int]:
+def read_keep(params: dict[str, Any]) -> frozenset[str]:
+    """섞지 않고 그대로 둘 글자 종류. 예: keep: [digit]이면 숫자는 추출해도 그대로 읽힌다."""
+    keep = params.get("keep") or ()
+    names = {name for name, _, _ in _CLASSES}
+    if isinstance(keep, str) or any(entry not in names for entry in keep):
+        raise ExamShieldError(
+            f"glyph_remap의 keep에는 {sorted(names)} 중에서 고른 목록을 준다: {keep!r}"
+        )
+    return frozenset(str(entry) for entry in keep)
+
+
+def scramble(
+    mapping: Mapping, stream: SeedStream, keep: frozenset[str] = frozenset()
+) -> tuple[Mapping, int]:
     groups: dict[str, set[bytes]] = {}
     for target in mapping.values():
         name = _class_of(target)
@@ -96,7 +110,8 @@ def scramble(mapping: Mapping, stream: SeedStream) -> tuple[Mapping, int]:
     swap: dict[bytes, bytes] = {}
     for name, _, _ in _CLASSES:
         targets = sorted(groups.get(name, ()))
-        if len(targets) < 2:
+        # 난수열은 그대로 쓰지 않는 종류에서도 소비하지 않는다. keep이 없으면 예전과 같은 결과다.
+        if len(targets) < 2 or name in keep:
             continue
         order = stream.shuffled(targets)
         for index, target in enumerate(order):
@@ -174,6 +189,7 @@ def probe_font(pdf: bytes, font_xref: int, code_bytes: int) -> Mapping:
 
 
 def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
+    keep = read_keep(params)
     doc = open_pdf_bytes(pdf)
     fonts: list[int] = []
     for xref in range(1, doc.xref_length()):
@@ -201,7 +217,7 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         if not mapping:
             unreadable += 1
             continue
-        mapping, count = scramble(mapping, SeedStream(context.seed, f"glyph_remap:{index}"))
+        mapping, count = scramble(mapping, SeedStream(context.seed, f"glyph_remap:{index}"), keep)
         if count == 0:
             continue
         target = existing

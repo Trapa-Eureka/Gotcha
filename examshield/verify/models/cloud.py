@@ -5,15 +5,15 @@ from urllib.parse import urlsplit
 from examshield.auth.keys import FoundKey
 from examshield.netguard import require_network
 from examshield.providers import Provider
-from examshield.verify.metrics import parse_answer, strip_answer_line
 from examshield.verify.models.base import (
     FILE,
     IMAGE,
-    PROMPT,
     TEXT,
     ModelInfo,
     ModelReply,
     PageInput,
+    prompt_of,
+    read_reply,
 )
 
 CHANNELS = (TEXT, IMAGE, FILE)
@@ -25,7 +25,8 @@ def chosen_model(provider: Provider) -> str:
 
 
 def prompt_for(page: PageInput, channel: str) -> str:
-    return f"{PROMPT}\n\n---\n{page.text}" if channel == TEXT else PROMPT
+    prompt = prompt_of(page)
+    return f"{prompt}\n\n---\n{page.text}" if channel == TEXT else prompt
 
 
 def b64(data: bytes) -> str:
@@ -33,9 +34,7 @@ def b64(data: bytes) -> str:
 
 
 def reply_from(text: str, page: PageInput) -> ModelReply:
-    return ModelReply(
-        transcription=strip_answer_line(text), answer=parse_answer(text, page.choice_count)
-    )
+    return read_reply(text, page)
 
 
 def abort_reason(company: str, status: int) -> str:

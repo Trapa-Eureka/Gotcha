@@ -38,53 +38,90 @@ SCENARIO_TECHNIQUES = {
 }
 
 
-# 쪽 번호(1부터) → 그 쪽에 있는 문항들의 정답 번호.
-AnswerKey = dict[int, frozenset[int]]
 MAX_CHOICE = 9
 
 
+@dataclass(frozen=True)
+class KeyEntry:
+    """정답표의 한 줄. 문항 번호가 없으면 그 쪽에 있는 어느 문항의 정답이라는 뜻이다."""
+
+    page: int
+    question: int | None
+    answer: int
+
+
+AnswerKey = tuple[KeyEntry, ...]
+
+
 def read_answer_key(path: Path) -> AnswerKey:
-    """정답표 CSV를 읽는다. 한 줄에 '쪽,정답' 하나. 한 쪽에 문항이 여럿이면 줄을 여러 개 쓴다."""
+    """정답표 CSV를 읽는다. 한 줄에 '쪽,정답' 또는 '쪽,문항,정답'. 두 형식을 섞어 쓰지 않는다."""
     try:
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as error:
         raise ExamShieldError(f"정답표를 읽지 못했다: {path}") from error
-    key: dict[int, set[int]] = {}
+    entries: list[KeyEntry] = []
     for number, row in enumerate(csv.reader(io.StringIO(text)), start=1):
         cells = [cell.strip() for cell in row]
-        if not any(cells):
+        while cells and not cells[-1]:
+            cells.pop()
+        if not cells:
             continue
         if number == 1 and not cells[0].isdigit():
             continue
-        if len(cells) < 2 or not cells[0].isdigit() or not cells[1].isdigit():
+        if len(cells) not in (2, 3) or not all(cell.isdigit() for cell in cells):
             raise ExamShieldError(
-                f"{path.name} {number}번째 줄: '쪽,정답' 형식이어야 한다. 예: 3,2"
+                f"{path.name} {number}번째 줄: '쪽,정답' 또는 '쪽,문항,정답' 형식이어야 한다. "
+                "예: 3,2 또는 3,12,2"
             )
-        page, answer = int(cells[0]), int(cells[1])
-        if page < 1 or not 1 <= answer <= MAX_CHOICE:
+        values = [int(cell) for cell in cells]
+        page, answer = values[0], values[-1]
+        question = values[1] if len(values) == 3 else None
+        if page < 1 or not 1 <= answer <= MAX_CHOICE or (question is not None and question < 1):
             raise ExamShieldError(
-                f"{path.name} {number}번째 줄: 쪽은 1 이상, 정답은 1~{MAX_CHOICE}이어야 한다."
+                f"{path.name} {number}번째 줄: 쪽과 문항은 1 이상, 정답은 1~{MAX_CHOICE}이어야 한다."
             )
-        key.setdefault(page, set()).add(answer)
-    if not key:
+        entries.append(KeyEntry(page, question, answer))
+    if not entries:
         raise ExamShieldError(f"정답표가 비어 있다: {path}")
-    return {page: frozenset(answers) for page, answers in key.items()}
+    if len({entry.question is None for entry in entries}) != 1:
+        raise ExamShieldError(
+            f"{path.name}: 문항 번호가 있는 줄과 없는 줄이 섞여 있다. 한 가지 형식으로 쓴다."
+        )
+    numbered = [entry.question for entry in entries if entry.question is not None]
+    if len(set(numbered)) != len(numbered):
+        raise ExamShieldError(f"{path.name}: 같은 문항 번호가 두 번 나온다.")
+    return tuple(entries)
 
 
-def _avoid(
+def key_for_pages(
     answer_key: AnswerKey | None, pages: int, profile: Profile
-) -> tuple[frozenset[int], ...] | None:
+) -> tuple[tuple[frozenset[int], ...] | None, tuple[tuple[tuple[int, int], ...], ...] | None]:
+    """정답표를 쪽별로 나눈다. (쪽마다 피할 번호, 쪽마다 (문항, 정답) 목록)을 돌려준다."""
     if answer_key is None:
-        return None
+        return None, None
     if not any(entry.id == "decoy" for entry in profile.techniques):
         raise ExamShieldError(
             f"프로파일 '{profile.name}'에는 미끼가 없어 정답표를 쓸 곳이 없다. "
             "a-remap-decoy나 a-full과 함께 쓴다."
         )
-    beyond = sorted(page for page in answer_key if page > pages)
+    beyond = sorted(entry.page for entry in answer_key if entry.page > pages)
     if beyond:
         raise ExamShieldError(f"정답표에 문서에 없는 쪽이 있다: {beyond[0]}쪽 (문서는 {pages}쪽)")
-    return tuple(answer_key.get(page, frozenset()) for page in range(1, pages + 1))
+    avoid = tuple(
+        frozenset(entry.answer for entry in answer_key if entry.page == page)
+        for page in range(1, pages + 1)
+    )
+    if not answer_key or answer_key[0].question is None:
+        return avoid, None
+    questions = tuple(
+        tuple(
+            (entry.question, entry.answer)
+            for entry in answer_key
+            if entry.page == page and entry.question is not None
+        )
+        for page in range(1, pages + 1)
+    )
+    return avoid, questions
 
 
 @dataclass(frozen=True)
@@ -93,6 +130,7 @@ class Protected:
     record: dict[str, Any]
     expectation: Expectation
     decoy_answers: tuple[int, ...] | None
+    decoy_items: tuple[tuple[int, int | None, int], ...] | None = None
 
 
 def sha256_hex(data: bytes) -> str:
@@ -139,11 +177,13 @@ def protect_bytes(
         raise ExamShieldError("쪽이 없는 PDF다.")
     originals = tuple(page_text(page) for page in source)
     input_hash = sha256_hex(pdf)
+    avoid, questions = key_for_pages(answer_key, len(originals), profile)
     context = Context(
         seed=derive_seed(input_hash, profile.sha256, seed_material),
         original_texts=originals,
         watermark_key=watermark_key,
-        avoid_answers=_avoid(answer_key, len(originals), profile),
+        avoid_answers=avoid,
+        questions=questions,
     )
 
     current = pdf
@@ -151,6 +191,7 @@ def protect_bytes(
     flattened_dpi: int | None = None
     decoy_texts: tuple[str, ...] = ()
     decoy_answers: tuple[int, ...] | None = None
+    decoy_items: tuple[tuple[int, int | None, int], ...] | None = None
     applied: list[dict[str, Any]] = []
     overlay_images = 0
     overlay_cell_pt: int | None = None
@@ -163,9 +204,10 @@ def protect_bytes(
             text = TEXT_ALTERED
         if outcome.flattened_dpi is not None:
             flattened_dpi = outcome.flattened_dpi
-            decoy_texts, decoy_answers = (), None
+            decoy_texts, decoy_answers, decoy_items = (), None, None
         if outcome.decoy_texts is not None:
             decoy_texts, decoy_answers = outcome.decoy_texts, outcome.decoy_answers
+            decoy_items = outcome.decoy_items
         overlay_images += outcome.overlay_images
         if outcome.pixel_tolerance is not None:
             pixel_tolerance = outcome.pixel_tolerance
@@ -203,10 +245,25 @@ def protect_bytes(
         "text_layer_similarity": round(similarity or 0.0, 4),
         "expect": expectation.as_dict(),
         "decoy_answers": list(decoy_answers) if decoy_answers is not None else None,
+        "decoy_items": decoy_items_record(decoy_items),
     }
     return Protected(
-        pdf=current, record=record, expectation=expectation, decoy_answers=decoy_answers
+        pdf=current,
+        record=record,
+        expectation=expectation,
+        decoy_answers=decoy_answers,
+        decoy_items=decoy_items,
     )
+
+
+def decoy_items_record(
+    items: tuple[tuple[int, int | None, int], ...] | None,
+) -> list[dict[str, int | None]] | None:
+    if items is None:
+        return None
+    return [
+        {"page": page, "question": question, "answer": answer} for page, question, answer in items
+    ]
 
 
 def protect_and_check(

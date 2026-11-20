@@ -31,6 +31,7 @@ from examshield.protect.copies import (
 )
 from examshield.protect.pipeline import (
     AnswerKey,
+    KeyEntry,
     append_log,
     job_path,
     load_expectation,
@@ -40,6 +41,16 @@ from examshield.protect.pipeline import (
     write_outputs,
 )
 from examshield.providers import PROVIDERS, Provider, get_provider
+from examshield.trace.decoys import (
+    DEFAULT_ALPHA,
+    DEFAULT_CHOICES,
+    DecoyTable,
+    analyse,
+    format_analysis,
+    load_tables,
+    read_decoys,
+    read_responses,
+)
 from examshield.trace.detect import format_trace
 from examshield.trace.detect import trace as trace_document
 from examshield.ui.server import make_server
@@ -273,6 +284,16 @@ def verify(
         "--avoid-answers",
         help="내장 문항의 정답을 정답표로 써서, protect --answer-key를 준 것처럼 잰다.",
     ),
+    benchmark: str = typer.Option(
+        "v1",
+        "--benchmark",
+        help="내장 문항 세트. v1은 쪽마다 문항 하나(12문항), v2는 쪽마다 문항 넷(36문항).",
+    ),
+    question_decoys: bool = typer.Option(
+        False,
+        "--question-decoys",
+        help="--avoid-answers에 더해, 정답표에 문항 번호를 적은 것처럼 문항마다 미끼를 넣어 잰다.",
+    ),
     record: bool = typer.Option(
         False,
         "--record",
@@ -289,6 +310,8 @@ def verify(
         only = tuple(part.strip() for part in channels.split(",")) if channels else None
         if record and only is not None:
             raise ExamShieldError("--record는 --channels와 함께 쓸 수 없다. 경로를 모두 재야 한다.")
+        if record and benchmark != "v1":
+            raise ExamShieldError("--record는 기본 문항 세트(v1)로 잰 결과에만 쓴다.")
         if record and (models is ModelGroup.mock or allow_custom is not None):
             raise ExamShieldError(
                 "--record는 내장 문항 세트를 실제 AI 모델로 잰 결과에만 쓴다. "
@@ -298,7 +321,7 @@ def verify(
         skipped: list[Skipped] = []
         cloud: list[ModelClient] = []
         if models is ModelGroup.mock:
-            clients = [TextLayerModel(), MockModel(load_items().items)]
+            clients = [TextLayerModel(), MockModel(load_items(benchmark).items)]
         if models in (ModelGroup.local, ModelGroup.all):
             clients, skipped = _local_models(local_model)
         if models in (ModelGroup.cloud, ModelGroup.all):
@@ -312,20 +335,20 @@ def verify(
                 raise ExamShieldError(f"--allow-custom 파일을 찾지 못했다: {allow_custom}")
             subject = custom_subject(allow_custom.read_bytes())
         else:
-            subject = builtin_subject(load_items())
+            subject = builtin_subject(load_items(benchmark))
         key: AnswerKey | None = None
-        if avoid_answers:
+        if avoid_answers or question_decoys:
             if subject.custom:
                 raise ExamShieldError("--avoid-answers는 정답을 아는 내장 문항 세트에만 쓴다.")
             if record:
                 raise ExamShieldError(
                     "--record는 --avoid-answers와 함께 쓸 수 없다. 검증 기록은 정답표 없이 잰다."
                 )
-            key = {
-                page: frozenset({truth.answer})
+            key = tuple(
+                KeyEntry(page, number if question_decoys else None, answer)
                 for page, truth in enumerate(subject.truths, start=1)
-                if truth.answer is not None
-            }
+                for number, answer in truth.questions
+            )
         if cloud:
             _confirm_cloud(loaded, subject, cloud, yes, only)
         report = run_verification(
@@ -721,6 +744,68 @@ def trace(
     typer.echo(format_trace(result))
     if not result.found:
         raise typer.Exit(1)
+
+
+@app.command(
+    help="응시자들의 답안이 숨은 미끼와 얼마나 일치하는지, 그 일치가 우연일 확률을 보여준다."
+)
+def decoys(
+    answers_file: Path = typer.Argument(
+        ..., metavar="답안", help="답안 CSV. 한 줄에 '수험번호,쪽,답' 또는 '수험번호,쪽,문항,답'"
+    ),
+    job: Path | None = typer.Option(
+        None, "--job", help="복사본의 작업 기록(.job.json). 모든 응시자가 같은 복사본을 받았을 때"
+    ),
+    jobs_dir: Path | None = typer.Option(
+        None, "--jobs-dir", help="protect --copies의 출력 폴더. --map-file과 함께 쓴다."
+    ),
+    map_file: Path | None = typer.Option(
+        None, "--map-file", help="protect --copies가 쓴 매핑표. --jobs-dir과 함께 쓴다."
+    ),
+    answer_key: Path | None = typer.Option(
+        None,
+        "--answer-key",
+        help="정답표 CSV. 미끼가 우연히 정답과 같은 문항을 빼고 본다.",
+    ),
+    choices: int = typer.Option(
+        DEFAULT_CHOICES,
+        "--choices",
+        min=2,
+        max=9,
+        help="문항의 선택지 수. 적게 줄수록 덜 지목한다.",
+    ),
+    alpha: float = typer.Option(
+        DEFAULT_ALPHA, "--alpha", help="전체에서 정직한 응시자를 잘못 지목할 확률의 한도"
+    ),
+) -> None:
+    try:
+        if (job is None) == (jobs_dir is None and map_file is None):
+            raise ExamShieldError("--job 하나를 주거나, --jobs-dir과 --map-file을 함께 준다.")
+        if job is None and (jobs_dir is None or map_file is None):
+            raise ExamShieldError("--jobs-dir과 --map-file은 함께 준다.")
+        for path in (answers_file, job, map_file):
+            if path is not None and not path.is_file():
+                raise ExamShieldError(f"파일을 찾지 못했다: {path}")
+        tables: DecoyTable | dict[str, DecoyTable]
+        if job is not None:
+            tables, key_used = read_decoys(job)
+        else:
+            assert jobs_dir is not None and map_file is not None
+            if not jobs_dir.is_dir():
+                raise ExamShieldError(f"폴더를 찾지 못했다: {jobs_dir}")
+            rows = [(row.examinee_id, row.file) for row in read_map(map_file)]
+            tables, key_used = load_tables(rows, jobs_dir)
+        result = analyse(
+            read_responses(answers_file),
+            tables,
+            key_used,
+            read_answer_key(answer_key) if answer_key is not None else None,
+            choices,
+            alpha,
+        )
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    typer.echo(format_analysis(result))
 
 
 @app.command(

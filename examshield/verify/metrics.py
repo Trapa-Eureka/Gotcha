@@ -6,6 +6,7 @@ from examshield.pdfio import normalize_text
 
 LONG_TEXT = 1000
 _ANSWER_LINE = re.compile(r"정답\s*(?:은|:|：)?\s*([1-9①-⑨])")
+_NUMBERED_ANSWER = re.compile(r"정답\s*(\d{1,3})\s*번?\s*[:：]\s*([1-9①-⑨])")
 _CIRCLED = {mark: number for number, mark in enumerate("①②③④⑤⑥⑦⑧⑨", start=1)}
 
 
@@ -34,6 +35,16 @@ def parse_answer(reply: str, choice_count: int) -> int | None:
     token = matches[-1]
     number = _CIRCLED.get(token) or int(token)
     return number if 1 <= number <= choice_count else None
+
+
+def parse_answers(reply: str, questions: tuple[int, ...], choice_count: int) -> dict[int, int]:
+    """'정답 12: 3' 꼴의 줄에서 문항별 답을 읽는다. 같은 문항이 여러 번 나오면 마지막 것을 쓴다."""
+    found: dict[int, int] = {}
+    for number, token in _NUMBERED_ANSWER.findall(reply):
+        answer = _CIRCLED.get(token) or int(token)
+        if int(number) in questions and 1 <= answer <= choice_count:
+            found[int(number)] = answer
+    return found
 
 
 def strip_answer_line(reply: str) -> str:
