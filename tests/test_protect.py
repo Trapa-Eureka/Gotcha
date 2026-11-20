@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 from examshield.cli import app
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, page_text
-from examshield.profiles import load_profile, parse_profile
+from examshield.profiles import Profile, load_profile, parse_profile
 from examshield.protect.pipeline import protect_bytes
 from examshield.protect.techniques.decoy import choice_count
 from examshield.verify.metrics import parse_answer
@@ -63,15 +63,25 @@ def test_choice_count_comes_from_the_page_or_falls_back() -> None:
     assert choice_count("서술형 문항", 5) == 5
 
 
-def test_scenario_b_and_unknown_techniques_are_refused(sample_pdf: bytes) -> None:
-    unknown = parse_profile(
-        {"name": "x", "scenario": "A", "status": "experimental", "techniques": [{"id": "dots"}]}
-    )
+def test_misplaced_and_unknown_techniques_are_refused(sample_pdf: bytes) -> None:
+    def profile(scenario: str, *ids: str) -> Profile:
+        return parse_profile(
+            {
+                "name": "x",
+                "scenario": scenario,
+                "status": "experimental",
+                "techniques": [{"id": name} for name in ids],
+            }
+        )
 
     with pytest.raises(ExamShieldError, match="시나리오 A"):
-        protect_bytes(sample_pdf, load_profile("none-print"))
-    with pytest.raises(ExamShieldError, match="dots"):
-        protect_bytes(sample_pdf, unknown)
+        protect_bytes(sample_pdf, profile("A", "dots"))
+    with pytest.raises(ExamShieldError, match="시나리오 B"):
+        protect_bytes(sample_pdf, profile("B", "decoy"))
+    with pytest.raises(ExamShieldError, match="맨 마지막"):
+        protect_bytes(sample_pdf, profile("B", "dots", "dots"))
+    with pytest.raises(ExamShieldError, match="모르는 기법"):
+        protect_bytes(sample_pdf, profile("A", "hologram"))
     with pytest.raises(ExamShieldError):
         protect_bytes(b"not a pdf", load_profile("none"))
 

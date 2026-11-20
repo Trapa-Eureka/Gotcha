@@ -20,11 +20,11 @@ from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
 from examshield.protect.copies import (
     check_seed,
+    keyed_technique,
     map_row,
     protect_copies,
     read_examinee_ids,
     read_map,
-    watermark_params,
     write_map,
 )
 from examshield.protect.pipeline import (
@@ -38,6 +38,15 @@ from examshield.protect.pipeline import (
 from examshield.providers import PROVIDERS, Provider, get_provider
 from examshield.trace.detect import format_trace
 from examshield.trace.detect import trace as trace_document
+from examshield.verify.calibrate import (
+    decode_photo,
+    format_comparison,
+    measure,
+    reference_pages,
+    simulated,
+    suggest,
+)
+from examshield.verify.capture_sim import CaptureConditions, conditions_from
 from examshield.verify.drift import (
     DEFAULT_REPORT_DIR,
     NOT_APPLICABLE,
@@ -539,7 +548,7 @@ def _protect_copies(
     if len(sources) != 1:
         raise ExamShieldError("--copies는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
     source = sources[0]
-    watermark_params(profile)
+    keyed_technique(profile)
     if seed_file is not None and not seed_file.is_file():
         raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
     seed = check_seed(seed_file.read_bytes() if seed_file is not None else None)
@@ -628,6 +637,51 @@ def trace(
     typer.echo(format_trace(result))
     if not result.found:
         raise typer.Exit(1)
+
+
+@app.command(
+    help="인쇄해서 찍은 사진의 촬영 조건을 재서 프로파일의 촬영 시뮬레이션과 나란히 보여준다."
+)
+def calibrate(
+    photo: Path = typer.Argument(..., metavar="사진", help="인쇄물 한 쪽을 찍은 사진(jpg, png 등)"),
+    printed: Path = typer.Option(..., "--printed", help="인쇄에 쓴 PDF(원본 또는 복사본)"),
+    profile: str = typer.Option(
+        "none-print", "--profile", help="촬영 조건을 견줄 시나리오 B 프로파일"
+    ),
+    page: int | None = typer.Option(
+        None, "--page", min=1, help="사진에 찍힌 쪽 번호. 없으면 가장 잘 맞는 쪽을 찾는다."
+    ),
+) -> None:
+    try:
+        loaded = load_profile(profile)
+        if loaded.scenario != "B":
+            raise ExamShieldError(
+                f"프로파일 '{profile}'은 시나리오 {loaded.scenario}용이라 촬영 조건이 없다. "
+                "none-print나 b-dots 같은 시나리오 B 프로파일을 준다."
+            )
+        for path in (photo, printed):
+            if not path.is_file():
+                raise ExamShieldError(f"파일을 찾지 못했다: {path}")
+        conditions = conditions_from(loaded.capture) if loaded.capture else CaptureConditions()
+        document = printed.read_bytes()
+        pages, texts = reference_pages(document)
+        engine = find_tesseract()
+        read = engine.read if engine else None
+        real = measure(
+            decode_photo(photo.read_bytes()), pages, texts, read, None if page is None else page - 1
+        )
+        model = simulated(document, real.page_index, conditions, read)
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    except OSError as error:
+        raise _fail(ExamShieldError(f"파일을 읽지 못했다: {error}")) from error
+    typer.echo(format_comparison(real, model))
+    typer.echo(f"\n이 사진에 맞춘 촬영 조건(어림값). 프로파일 '{profile}'의 capture에 넣어 쓴다.")
+    typer.echo("capture:")
+    for key, value in suggest(real, conditions).items():
+        typer.echo(f"  {key}: {value}")
+    if read is None:
+        typer.echo("참고: Tesseract가 없어 OCR 판독률은 재지 않았다.")
 
 
 @app.command(help="원본과 복사본의 내용이 같은지 검사한다. 다르면 종료 코드 1.")

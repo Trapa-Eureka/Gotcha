@@ -1,0 +1,19 @@
+name: b-dots
+scenario: B
+status: experimental
+description: 인쇄용. 쪽 전체에 미세한 점 무늬를 찍는다. --copies와 함께 쓰면 무늬가 수험번호마다 달라서, 인쇄물을 찍은 사진에서 수험번호를 찾을 수 있다. AI 판독을 막는 효과는 확인되지 않았다.
+techniques:
+  - id: dots
+    params:
+      cell_pt: 6
+      ink: 255
+capture:
+  print_dpi: 300
+  capture_width: 1600
+  skew_degrees: 2.0
+  perspective: 0.03
+  illumination: 0.25
+  blur_sigma: 0.8
+  noise_sigma: 4.0
+  jpeg_quality: 80
+  seed: 20261120

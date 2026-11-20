@@ -22,3 +22,5 @@ class Outcome:
     decoy_answers: tuple[int, ...] | None = None
     overlay_images: int = 0
     pixel_tolerance: int | None = None
+    # 도트 무늬를 덧씌웠으면 그 칸 크기와 진하기. check가 무늬를 걷어 내고 비교한다.
+    dots: dict[str, int] | None = None

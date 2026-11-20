@@ -12,7 +12,7 @@ from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile
 from examshield.protect.seed import derive_seed
-from examshield.protect.techniques import decoy, glyph_remap, rasterize, watermark
+from examshield.protect.techniques import decoy, dots, glyph_remap, rasterize, watermark
 from examshield.protect.techniques.base import TEXT_ALTERED, TEXT_PRESERVED, Context, Outcome
 from examshield.verify.metrics import legibility, mean
 
@@ -25,7 +25,12 @@ TECHNIQUES: dict[str, Callable[[bytes, dict[str, Any], Context], Outcome]] = {
     "glyph_remap": glyph_remap.apply,
     "decoy": decoy.apply,
     "watermark": watermark.apply,
+    "dots": dots.apply,
 }
+# 수험번호별 키를 받아 복사본마다 다른 무늬를 넣는 기법. 프로파일의 맨 마지막에 하나만 온다.
+KEYED = ("watermark", "dots")
+# 인쇄하면 사라지는 기법(텍스트 레이어, 2% 밝기 차이)은 시나리오 B 프로파일에 넣지 않는다.
+SCENARIO_TECHNIQUES = {"A": ("rasterize", "glyph_remap", "decoy", "watermark"), "B": ("dots",)}
 
 
 @dataclass(frozen=True)
@@ -46,23 +51,27 @@ def protect_bytes(
     seed_material: bytes | None = None,
     watermark_key: bytes | None = None,
 ) -> Protected:
-    if profile.scenario != "A":
-        raise ExamShieldError(
-            f"프로파일 '{profile.name}'은 시나리오 {profile.scenario}용이다. "
-            "protect는 지금 시나리오 A(디지털 배포) 프로파일만 지원한다."
-        )
     unknown = [entry.id for entry in profile.techniques if entry.id not in TECHNIQUES]
     if unknown:
         raise ExamShieldError(
             f"프로파일 '{profile.name}'에 모르는 기법이 있다: {', '.join(unknown)}"
         )
     order = [entry.id for entry in profile.techniques]
+    misplaced = [name for name in order if name not in SCENARIO_TECHNIQUES[profile.scenario]]
+    if misplaced:
+        raise ExamShieldError(
+            f"프로파일 '{profile.name}'(시나리오 {profile.scenario})에 맞지 않는 기법이 있다: "
+            f"{', '.join(misplaced)}. 시나리오 {profile.scenario}에서 쓰는 기법은 "
+            f"{', '.join(SCENARIO_TECHNIQUES[profile.scenario])}이다."
+        )
     if "decoy" in order and "glyph_remap" in order[order.index("decoy") :]:
         raise ExamShieldError(
             f"프로파일 '{profile.name}': glyph_remap은 decoy보다 먼저 와야 한다. 뒤에 오면 미끼 문구까지 섞인다."
         )
-    if "watermark" in order[:-1]:
-        raise ExamShieldError(f"프로파일 '{profile.name}': watermark는 맨 마지막 기법이어야 한다.")
+    if any(name in KEYED for name in order[:-1]):
+        raise ExamShieldError(
+            f"프로파일 '{profile.name}': watermark와 dots는 맨 마지막 기법이어야 한다."
+        )
     try:
         source = open_pdf_bytes(pdf)
     except Exception as error:
@@ -87,6 +96,7 @@ def protect_bytes(
     applied: list[dict[str, Any]] = []
     overlay_images = 0
     overlay_cell_pt: int | None = None
+    dots_spec: dict[str, int] | None = None
     pixel_tolerance = PIXEL_TOLERANCE
     for entry in profile.techniques:
         outcome = TECHNIQUES[entry.id](current, entry.params, context)
@@ -101,7 +111,9 @@ def protect_bytes(
         overlay_images += outcome.overlay_images
         if outcome.pixel_tolerance is not None:
             pixel_tolerance = outcome.pixel_tolerance
-        if outcome.overlay_images:
+        if outcome.dots is not None:
+            dots_spec = outcome.dots
+        elif outcome.overlay_images:
             overlay_cell_pt = int(outcome.stats["cell_pt"])
         applied.append({"id": entry.id, "params": entry.params, "stats": outcome.stats})
 
@@ -112,6 +124,8 @@ def protect_bytes(
         overlay_images=overlay_images,
         pixel_tolerance=pixel_tolerance,
         overlay_cell_pt=overlay_cell_pt,
+        dots_cell_pt=dots_spec["cell_pt"] if dots_spec else None,
+        dots_ink=dots_spec["ink"] if dots_spec else None,
     )
     copies = tuple(page_text(page) for page in open_pdf_bytes(current))
     similarity = mean(

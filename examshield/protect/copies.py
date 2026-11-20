@@ -8,12 +8,14 @@ from pathlib import Path
 from examshield.check.compare import CheckResult, Expectation, Ocr, compare
 from examshield.errors import ExamShieldError
 from examshield.profiles import Profile
-from examshield.protect.pipeline import Protected, protect_bytes, sha256_hex
-from examshield.protect.techniques import watermark
+from examshield.protect.pipeline import KEYED, TECHNIQUES, Protected, protect_bytes, sha256_hex
+from examshield.protect.techniques import dots, watermark
 from examshield.protect.techniques.base import Context
 
 WATERMARK = "watermark"
-MAP_COLUMNS = ("examinee_id", "code", "file", "output_sha256", "cell_pt")
+DOTS = "dots"
+MAP_COLUMNS = ("examinee_id", "code", "file", "output_sha256", "cell_pt", "kind")
+CELL_RANGES = {WATERMARK: watermark.CELL_RANGE, DOTS: dots.CELL_RANGE}
 HEADER_WORDS = {"수험번호", "examinee_id", "examinee", "id", "번호", "학번"}
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 MIN_SEED_BYTES = 16
@@ -26,6 +28,8 @@ class MapRow:
     file: str
     output_sha256: str
     cell_pt: int
+    # 무늬의 종류. watermark는 화면용 옅은 바탕 무늬, dots는 인쇄용 점 무늬다.
+    kind: str = WATERMARK
 
 
 def read_examinee_ids(path: Path) -> list[str]:
@@ -67,13 +71,14 @@ def check_seed(seed: bytes | None) -> bytes:
     return seed
 
 
-def watermark_params(profile: Profile) -> dict[str, object]:
+def keyed_technique(profile: Profile) -> tuple[str, dict[str, object]]:
+    """수험번호마다 다른 무늬를 넣는 기법과 그 설정값."""
     for entry in profile.techniques:
-        if entry.id == WATERMARK:
-            return entry.params
+        if entry.id in KEYED:
+            return entry.id, entry.params
     raise ExamShieldError(
-        f"프로파일 '{profile.name}'에는 watermark 기법이 없다. "
-        "--copies는 a-watermark처럼 워터마크가 든 프로파일과 함께 쓴다."
+        f"프로파일 '{profile.name}'에는 수험번호별 무늬를 넣는 기법(watermark, dots)이 없다. "
+        "--copies는 a-watermark, a-full, b-dots 같은 프로파일과 함께 쓴다."
     )
 
 
@@ -88,9 +93,9 @@ def protect_copies(
     pdf: bytes, profile: Profile, seed: bytes, examinee_ids: list[str], ocr: Ocr | None = None
 ) -> tuple[CheckResult, Iterator[Copy]]:
     """워터마크 전 단계는 한 번만 만들고 검사한다. 그 위에 수험번호별 무늬만 따로 덧씌운다."""
-    params = watermark_params(profile)
+    kind, params = keyed_technique(profile)
     base_profile = replace(
-        profile, techniques=tuple(e for e in profile.techniques if e.id != WATERMARK)
+        profile, techniques=tuple(e for e in profile.techniques if e.id not in KEYED)
     )
     base = protect_bytes(pdf, base_profile, seed)
     base_check = compare(pdf, base.pdf, base.expectation, ocr)
@@ -99,29 +104,29 @@ def protect_copies(
         context = Context(seed=b"", original_texts=())
         for examinee_id in examinee_ids:
             key = watermark.derive_key(seed, examinee_id)
-            outcome = watermark.apply(base.pdf, params, replace(context, watermark_key=key))
+            outcome = TECHNIQUES[kind](base.pdf, params, replace(context, watermark_key=key))
             tolerance = outcome.pixel_tolerance or base.expectation.pixel_tolerance
-            cell = int(outcome.stats["cell_pt"])
-            # 워터마크 전 문서와 비교한다. 달라도 되는 것은 덧씌운 무늬 한 장뿐이다.
-            check = compare(
-                base.pdf,
-                outcome.pdf,
-                Expectation(
-                    overlay_images=outcome.overlay_images,
-                    pixel_tolerance=tolerance,
-                    overlay_cell_pt=cell,
-                ),
-            )
-            expectation = replace(
-                base.expectation,
+            overlay = Expectation(
                 overlay_images=outcome.overlay_images,
                 pixel_tolerance=tolerance,
-                overlay_cell_pt=cell,
+                overlay_cell_pt=None if outcome.dots else int(outcome.stats["cell_pt"]),
+                dots_cell_pt=outcome.dots["cell_pt"] if outcome.dots else None,
+                dots_ink=outcome.dots["ink"] if outcome.dots else None,
+            )
+            # 무늬를 넣기 전 문서와 비교한다. 달라도 되는 것은 덧씌운 무늬 한 장뿐이다.
+            check = compare(base.pdf, outcome.pdf, overlay)
+            expectation = replace(
+                base.expectation,
+                overlay_images=overlay.overlay_images,
+                pixel_tolerance=overlay.pixel_tolerance,
+                overlay_cell_pt=overlay.overlay_cell_pt,
+                dots_cell_pt=overlay.dots_cell_pt,
+                dots_ink=overlay.dots_ink,
             )
             record = dict(base.record)
             record["techniques"] = [
                 *base.record["techniques"],
-                {"id": WATERMARK, "params": params, "stats": outcome.stats},
+                {"id": kind, "params": params, "stats": outcome.stats},
             ]
             record["output_sha256"] = sha256_hex(outcome.pdf)
             record["expect"] = expectation.as_dict()
@@ -143,8 +148,10 @@ def protect_copies(
 
 def map_row(copy: Copy, seed: bytes, file_name: str) -> MapRow:
     key = watermark.derive_key(seed, copy.examinee_id)
-    stats = copy.protected.record["techniques"][-1]["stats"]
+    last = copy.protected.record["techniques"][-1]
+    stats = last["stats"]
     return MapRow(
+        kind=str(last["id"]),
         examinee_id=copy.examinee_id,
         code=watermark.code_of(key),
         file=file_name,
@@ -159,7 +166,9 @@ def write_map(path: Path, rows: list[MapRow]) -> None:
         writer = csv.writer(handle)
         writer.writerow(MAP_COLUMNS)
         for row in rows:
-            writer.writerow([row.examinee_id, row.code, row.file, row.output_sha256, row.cell_pt])
+            writer.writerow(
+                [row.examinee_id, row.code, row.file, row.output_sha256, row.cell_pt, row.kind]
+            )
 
 
 def read_map(path: Path) -> list[MapRow]:
@@ -172,6 +181,8 @@ def read_map(path: Path) -> list[MapRow]:
                     file=entry["file"],
                     output_sha256=entry["output_sha256"],
                     cell_pt=int(entry["cell_pt"]),
+                    # 이 열이 없는 매핑표는 도트 무늬가 생기기 전에 만든 것이다.
+                    kind=entry.get("kind") or WATERMARK,
                 )
                 for entry in csv.DictReader(handle)
             ]
@@ -179,7 +190,10 @@ def read_map(path: Path) -> list[MapRow]:
         raise ExamShieldError(f"매핑표를 읽지 못했다: {path}") from error
     if not rows:
         raise ExamShieldError(f"매핑표가 비어 있다: {path}")
-    low, high = watermark.CELL_RANGE
-    if any(not low <= row.cell_pt <= high for row in rows):
-        raise ExamShieldError(f"매핑표의 cell_pt 값이 범위({low}~{high})를 벗어났다: {path}")
+    if any(row.kind not in CELL_RANGES for row in rows):
+        raise ExamShieldError(f"매핑표의 kind 값을 모른다: {path}")
+    for row in rows:
+        low, high = CELL_RANGES[row.kind]
+        if not low <= row.cell_pt <= high:
+            raise ExamShieldError(f"매핑표의 cell_pt 값이 범위({low}~{high})를 벗어났다: {path}")
     return rows

@@ -7,6 +7,8 @@ import pytest
 from typer.testing import CliRunner
 
 from examshield.cli import app
+from examshield.pdfio import read_pdf, render_gray
+from examshield.verify.capture_sim import CaptureConditions, encode_png, simulate_capture
 from tests.conftest import A_PROFILES
 
 PACKAGE = Path(__file__).resolve().parent.parent / "examshield"
@@ -50,7 +52,7 @@ def no_sockets(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return attempts
 
 
-@pytest.mark.parametrize("profile", ("none", *A_PROFILES))
+@pytest.mark.parametrize("profile", ("none", *A_PROFILES, "b-dots"))
 def test_protect_and_check_run_with_sockets_blocked(
     profile: str, sample_file: Path, tmp_path: Path, no_sockets: list[str]
 ) -> None:
@@ -142,3 +144,40 @@ def test_protect_and_check_never_import_a_network_module() -> None:
 
     assert "examshield.protect.techniques.glyph_remap" in seen
     assert "examshield.verify.models.local" not in seen
+
+
+def test_print_copies_photo_trace_and_calibrate_run_with_sockets_blocked(
+    sample_file: Path, tmp_path: Path, no_sockets: list[str]
+) -> None:
+    runner = CliRunner()
+    seed = tmp_path / "exam.seed"
+    seed.write_bytes(b"0123456789abcdef-seed")
+    ids = tmp_path / "ids.csv"
+    ids.write_text("A1\nA2\n")
+    table = tmp_path / "map.csv"
+    out = tmp_path / "out"
+    made = runner.invoke(
+        app,
+        [
+            "protect", str(sample_file), "--out", str(out), "--profile", "b-dots",
+            "--copies", str(ids), "--seed-file", str(seed), "--map-file", str(table),
+        ],
+    )  # fmt: skip
+    printed = render_gray(read_pdf(out / "exam-A2.pdf")[0], 300)
+    photo = tmp_path / "photo.png"
+    photo.write_bytes(encode_png(simulate_capture(printed, CaptureConditions())))
+    traced = runner.invoke(
+        app,
+        [
+            "trace", str(photo), "--original", str(sample_file),
+            "--map-file", str(table), "--seed-file", str(seed),
+        ],
+    )  # fmt: skip
+    measured = runner.invoke(
+        app, ["calibrate", str(photo), "--printed", str(out / "exam-A2.pdf"), "--profile", "b-dots"]
+    )
+
+    assert made.exit_code == 0, made.output
+    assert traced.exit_code == 0 and "A2" in traced.output, traced.output
+    assert measured.exit_code == 0, measured.output
+    assert no_sockets == []
