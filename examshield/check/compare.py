@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from examshield.errors import ExamShieldError
 from examshield.pdfio import (
@@ -18,6 +19,8 @@ from examshield.verify.metrics import legibility, mean
 CHECK_DPI = 150
 MIN_FLATTEN_DPI = 150
 PIXEL_TOLERANCE = 2
+MAX_PIXEL_TOLERANCE = 14
+WATERMARK_SLACK = 2
 SIZE_TOLERANCE = 0.01
 OCR_TOLERANCE = 0.02
 TEXT_PRESERVED = "preserved"
@@ -31,9 +34,19 @@ class Expectation:
     text: str = TEXT_PRESERVED
     flattened_dpi: int | None = None
     decoys: tuple[str, ...] = ()
+    overlay_images: int = 0
+    pixel_tolerance: int = PIXEL_TOLERANCE
+    overlay_cell_pt: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "flattened_dpi": self.flattened_dpi, "decoys": list(self.decoys)}
+        return {
+            "text": self.text,
+            "flattened_dpi": self.flattened_dpi,
+            "decoys": list(self.decoys),
+            "overlay_images": self.overlay_images,
+            "pixel_tolerance": self.pixel_tolerance,
+            "overlay_cell_pt": self.overlay_cell_pt,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Expectation":
@@ -41,7 +54,20 @@ class Expectation:
         if text not in (TEXT_PRESERVED, TEXT_ALTERED):
             raise ExamShieldError(f"작업 기록의 expect.text 값이 잘못됐다: {text!r}")
         dpi = data.get("flattened_dpi")
+        overlay = int(data.get("overlay_images", 0))
+        tolerance = int(data.get("pixel_tolerance", PIXEL_TOLERANCE))
+        cell = data.get("overlay_cell_pt")
+        relaxed = overlay == 1 or tolerance != PIXEL_TOLERANCE
+        if (
+            overlay not in (0, 1)
+            or not PIXEL_TOLERANCE <= tolerance <= MAX_PIXEL_TOLERANCE
+            or (relaxed and (overlay != 1 or cell is None or not 4 <= int(cell) <= 24))
+        ):
+            raise ExamShieldError("작업 기록의 워터마크 허용값이 범위를 벗어났다.")
         return cls(
+            overlay_images=overlay,
+            pixel_tolerance=tolerance,
+            overlay_cell_pt=int(cell) if cell is not None else None,
             text=text,
             flattened_dpi=int(dpi) if dpi is not None else None,
             decoys=tuple(str(entry) for entry in data.get("decoys") or ()),
@@ -128,13 +154,17 @@ def compare(
             result.differences.append(f"{number}쪽: 렌더링 크기가 다르다")
             continue
         delta = np.abs(left.astype(np.int16) - right.astype(np.int16)).max(axis=2)
+        if expect.overlay_images and not _looks_like_watermark(left, right, expect, dpi):
+            result.differences.append(
+                f"{number}쪽: 덧씌운 무늬가 워터마크 격자 모양이 아니다. 다른 내용이 옅게 들어갔을 수 있다"
+            )
         page_max = int(delta.max())
         max_diff = max(max_diff, page_max)
-        changed += int((delta > PIXEL_TOLERANCE).sum())
+        changed += int((delta > expect.pixel_tolerance).sum())
         total += int(delta.size)
-        if page_max > PIXEL_TOLERANCE:
+        if page_max > expect.pixel_tolerance:
             result.differences.append(
-                f"{number}쪽: 렌더링이 다르다 (최대 밝기 차이 {page_max}/255, 허용 {PIXEL_TOLERANCE})"
+                f"{number}쪽: 렌더링이 다르다 (최대 밝기 차이 {page_max}/255, 허용 {expect.pixel_tolerance})"
             )
     result.visual_max_diff = max_diff
     result.visual_changed_ratio = changed / total if total else 0.0
@@ -152,6 +182,38 @@ def compare(
     return result
 
 
+def _looks_like_watermark(
+    before: NDArray[np.uint8], after: NDArray[np.uint8], expect: Expectation, dpi: int
+) -> bool:
+    """빈 바탕의 칸마다 어두워진 정도가 고르고, 값이 '그대로'와 '무늬 세기' 두 가지뿐인지 본다.
+
+    옅은 글자나 그림을 덧씌우면 칸 안이 고르지 않거나 중간값이 나온다.
+    칸 단위로 그린 무늬는 워터마크와 구별하지 못한다.
+    """
+    cell = expect.overlay_cell_pt
+    if cell is None:
+        return False
+    strength = expect.pixel_tolerance - WATERMARK_SLACK
+    light = before.min(axis=2)
+    darker = light.astype(np.float64) - after.min(axis=2).astype(np.float64)
+    step = cell * dpi / 72.0
+    inset = step * 0.25
+    height, width = light.shape
+    for row in range(int(height / step)):
+        top, bottom = round(row * step + inset), round((row + 1) * step - inset)
+        for col in range(int(width / step)):
+            left, right = round(col * step + inset), round((col + 1) * step - inset)
+            if bottom <= top or right <= left or int(np.min(light[top:bottom, left:right])) < 250:
+                continue
+            patch = darker[top:bottom, left:right]
+            level = float(np.mean(patch))
+            if float(np.max(patch) - np.min(patch)) > 1.0:
+                return False
+            if abs(level) > 1.0 and abs(level - strength) > 1.5:
+                return False
+    return True
+
+
 def _same_text(before: str, after: str, decoy: str) -> bool:
     left, right = normalize_text(before), normalize_text(after)
     if decoy:
@@ -162,11 +224,12 @@ def _same_text(before: str, after: str, decoy: str) -> bool:
 def _compare_images(
     number: int, before: Any, after: Any, expect: Expectation, result: CheckResult
 ) -> None:
-    had, has = len(before.get_images(full=True)), len(after.get_images(full=True))
+    # 쪽에 실제로 그려진 그림을 센다. 자원 목록으로 세면 쪽끼리 자원을 같이 쓰는 문서에서 틀린다.
+    had, has = len(before.get_image_info()), len(after.get_image_info())
     if expect.flattened_dpi is not None:
-        if has != 1:
+        if has != 1 + expect.overlay_images:
             result.differences.append(f"{number}쪽: 이미지화한 쪽인데 그림이 {has}개다")
-    elif had != has:
+    elif had + expect.overlay_images != has:
         result.differences.append(f"{number}쪽: 그림 개수가 다르다 (원본 {had}, 복사본 {has})")
 
 

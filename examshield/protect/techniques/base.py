@@ -9,6 +9,7 @@ TEXT_ALTERED = "altered"
 class Context:
     seed: bytes
     original_texts: tuple[str, ...]
+    watermark_key: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -19,3 +20,5 @@ class Outcome:
     flattened_dpi: int | None = None
     decoy_texts: tuple[str, ...] | None = None
     decoy_answers: tuple[int, ...] | None = None
+    overlay_images: int = 0
+    pixel_tolerance: int | None = None

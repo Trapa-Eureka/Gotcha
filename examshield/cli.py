@@ -1,5 +1,7 @@
+import glob
 import importlib
 import os
+import unicodedata
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -14,6 +16,15 @@ from examshield.errors import ExamShieldError, ModelUnavailableError
 from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, load_profile
+from examshield.protect.copies import (
+    check_seed,
+    map_row,
+    protect_copies,
+    read_examinee_ids,
+    read_map,
+    watermark_params,
+    write_map,
+)
 from examshield.protect.pipeline import (
     append_log,
     job_path,
@@ -23,6 +34,8 @@ from examshield.protect.pipeline import (
     write_outputs,
 )
 from examshield.providers import PROVIDERS, Provider, get_provider
+from examshield.trace.detect import format_trace
+from examshield.trace.detect import trace as trace_document
 from examshield.verify.models.base import ModelClient
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.cloud import chosen_model
@@ -71,6 +84,7 @@ def _local_models(local_model: str | None) -> tuple[list[ModelClient], list[Skip
     return models, skipped
 
 
+VERIFY_WATERMARK_KEY = b"examshield-verify-sample"
 CLOUD_CLASSES = {
     "openai": ("examshield.verify.models.openai", "OpenAIModel"),
     "anthropic": ("examshield.verify.models.anthropic", "AnthropicModel"),
@@ -211,7 +225,8 @@ def verify(
             clients + cloud,
             now=datetime.now().astimezone(),
             skipped=skipped,
-            transform=lambda pdf: protect_bytes(pdf, loaded),
+            # 워터마크가 든 프로파일은 고정된 가짜 번호의 무늬로 잰다. 무늬가 판독에 주는 영향을 보기 위해서다.
+            transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY),
         )
         path = write_report(report, out)
     except ExamShieldError as error:
@@ -293,11 +308,26 @@ def protect(
     force: bool = typer.Option(
         False, "--force", help="출력 폴더에 같은 이름의 파일이 있어도 덮어쓴다."
     ),
+    copies: Path | None = typer.Option(
+        None,
+        "--copies",
+        help="수험번호 CSV. 번호마다 고유 워터마크가 든 복사본을 만든다. --seed-file이 필요하다.",
+    ),
+    map_file: Path | None = typer.Option(
+        None,
+        "--map-file",
+        help="수험번호 매핑표를 쓸 곳. 기본값 secrets/<이름>.watermark-map.csv. 출력 폴더 안은 안 된다.",
+    ),
 ) -> None:
     failed = 0
     try:
         loaded = load_profile(profile)
         sources = _inputs(source)
+        if copies is not None:
+            _protect_copies(sources, out, loaded, seed_file, force, copies, map_file)
+            return
+        if map_file is not None:
+            raise ExamShieldError("--map-file은 --copies와 함께 쓴다.")
         if out.exists() and not out.is_dir():
             raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
         # 대소문자나 유니코드 정규화만 다른 경로도 같은 폴더로 잡으려고 samefile로 비교한다.
@@ -338,6 +368,122 @@ def protect(
     except OSError as error:
         raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
     if failed:
+        raise typer.Exit(1)
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    """path가 folder 안(또는 folder 자체)인지 본다. 대소문자나 유니코드 표기만 다른 경로도 잡는다."""
+    resolved = path.resolve()
+    for candidate in (resolved, *resolved.parents):
+        if folder.exists() and candidate.exists() and candidate.samefile(folder):
+            return True
+    wanted = unicodedata.normalize("NFC", str(folder.resolve())).casefold()
+    return any(
+        unicodedata.normalize("NFC", str(candidate)).casefold() == wanted
+        for candidate in (resolved, *resolved.parents)
+    )
+
+
+def _protect_copies(
+    sources: list[Path],
+    out: Path,
+    profile: Profile,
+    seed_file: Path | None,
+    force: bool,
+    copies: Path,
+    map_file: Path | None,
+) -> None:
+    if len(sources) != 1:
+        raise ExamShieldError("--copies는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
+    source = sources[0]
+    watermark_params(profile)
+    if seed_file is not None and not seed_file.is_file():
+        raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
+    seed = check_seed(seed_file.read_bytes() if seed_file is not None else None)
+    ids = read_examinee_ids(copies)
+    if out.exists() and not out.is_dir():
+        raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
+    if out.is_dir() and out.samefile(source.parent):
+        raise ExamShieldError("출력 폴더가 원본이 있는 폴더와 같다. 다른 폴더를 지정한다.")
+    table = map_file or Path("secrets") / f"{source.stem}.watermark-map.csv"
+    # S5: 매핑표와 시드는 배포하는 폴더에 두지 않는다.
+    for label, path in (("매핑표", table), ("시드 파일", seed_file), ("수험번호 목록", copies)):
+        if path is not None and _inside(path, out):
+            raise ExamShieldError(
+                f"{label}를 출력 폴더 안에 둘 수 없다. 출력 폴더는 배포하는 곳이다: {path}"
+            )
+    targets = [out / f"{source.stem}-{examinee}.pdf" for examinee in ids]
+    existing = [str(path) for path in targets if path.exists() or job_path(path).exists()]
+    if table.exists():
+        existing.append(str(table))
+    if existing and not force:
+        shown = ", ".join(existing[:5]) + (" 외" if len(existing) > 5 else "")
+        raise ExamShieldError(f"이미 같은 이름의 파일이 있다. 덮어쓰려면 --force를 준다: {shown}")
+    # 이번 목록에 없는 예전 복사본이 남으면 매핑표와 폴더가 어긋난다. 지우지는 않고 멈춘다.
+    wanted = {path.name for path in targets}
+    stale = sorted(
+        path.name
+        for path in (out.glob(f"{glob.escape(source.stem)}-*.pdf") if out.is_dir() else [])
+        if path.name not in wanted
+    )
+    if stale:
+        raise ExamShieldError(
+            "출력 폴더에 이번 수험번호 목록에 없는 복사본이 있다. 치우거나 새 폴더를 쓴다: "
+            + ", ".join(stale[:5])
+        )
+    # 매핑표를 쓸 수 있는지 복사본을 만들기 전에 확인한다. 복사본만 남고 매핑표가 없으면 추적할 수 없다.
+    write_map(table, [])
+    engine = find_tesseract()
+    original = read_document(source, out)
+    base_check, made = protect_copies(original, profile, seed, ids, engine.read if engine else None)
+    if not base_check.passed:
+        typer.echo(f"{source.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
+        typer.echo(format_result(base_check), err=True)
+        raise typer.Exit(1)
+    rows = []
+    for copy in made:
+        append_log(out, copy.protected, copy.check.passed, datetime.now().astimezone())
+        if not copy.check.passed:
+            typer.echo(f"{copy.examinee_id}: 워터마크 검사 실패. 중단한다.", err=True)
+            typer.echo(format_result(copy.check), err=True)
+            raise typer.Exit(1)
+        written = write_outputs(copy.protected, out, f"{source.stem}-{copy.examinee_id}")
+        rows.append(map_row(copy, seed, written.name))
+    write_map(table, rows)
+    typer.echo(f"{source.name} → {out}  복사본 {len(rows)}개, 모두 검사 통과")
+    typer.echo(
+        f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개). 목록의 제목 줄이 번호로 읽히지 않았는지 확인한다."
+    )
+    typer.echo(f"매핑표: {table}")
+    typer.echo("매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.")
+
+
+@app.command(
+    help="유출된 PDF나 화면 캡처가 어느 수험번호의 복사본인지 찾는다. 못 찾으면 종료 코드 1."
+)
+def trace(
+    leaked: Path = typer.Argument(..., metavar="유출본", help="PDF 또는 그림 파일(png, jpg 등)"),
+    original: Path = typer.Option(..., "--original", help="변환 전 원본 PDF 또는 .docx"),
+    map_file: Path = typer.Option(..., "--map-file", help="protect --copies가 쓴 매핑표"),
+    seed_file: Path = typer.Option(..., "--seed-file", help="protect --copies에 쓴 시드 파일"),
+) -> None:
+    try:
+        for path in (leaked, original, map_file, seed_file):
+            if not path.is_file():
+                raise ExamShieldError(f"파일을 찾지 못했다: {path}")
+        result = trace_document(
+            leaked.read_bytes(),
+            leaked.suffix,
+            read_document(original, leaked.resolve().parent),
+            read_map(map_file),
+            seed_file.read_bytes(),
+        )
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    except OSError as error:
+        raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    typer.echo(format_trace(result))
+    if not result.found:
         raise typer.Exit(1)
 
 

@@ -7,12 +7,12 @@ from pathlib import Path
 from typing import Any
 
 from examshield import __version__
-from examshield.check.compare import CheckResult, Expectation, Ocr, compare
+from examshield.check.compare import PIXEL_TOLERANCE, CheckResult, Expectation, Ocr, compare
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile
 from examshield.protect.seed import derive_seed
-from examshield.protect.techniques import decoy, glyph_remap, rasterize
+from examshield.protect.techniques import decoy, glyph_remap, rasterize, watermark
 from examshield.protect.techniques.base import TEXT_ALTERED, TEXT_PRESERVED, Context, Outcome
 from examshield.verify.metrics import legibility, mean
 
@@ -24,6 +24,7 @@ TECHNIQUES: dict[str, Callable[[bytes, dict[str, Any], Context], Outcome]] = {
     "rasterize": rasterize.apply,
     "glyph_remap": glyph_remap.apply,
     "decoy": decoy.apply,
+    "watermark": watermark.apply,
 }
 
 
@@ -39,7 +40,12 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def protect_bytes(pdf: bytes, profile: Profile, seed_material: bytes | None = None) -> Protected:
+def protect_bytes(
+    pdf: bytes,
+    profile: Profile,
+    seed_material: bytes | None = None,
+    watermark_key: bytes | None = None,
+) -> Protected:
     if profile.scenario != "A":
         raise ExamShieldError(
             f"프로파일 '{profile.name}'은 시나리오 {profile.scenario}용이다. "
@@ -55,6 +61,8 @@ def protect_bytes(pdf: bytes, profile: Profile, seed_material: bytes | None = No
         raise ExamShieldError(
             f"프로파일 '{profile.name}': glyph_remap은 decoy보다 먼저 와야 한다. 뒤에 오면 미끼 문구까지 섞인다."
         )
+    if "watermark" in order[:-1]:
+        raise ExamShieldError(f"프로파일 '{profile.name}': watermark는 맨 마지막 기법이어야 한다.")
     try:
         source = open_pdf_bytes(pdf)
     except Exception as error:
@@ -66,7 +74,9 @@ def protect_bytes(pdf: bytes, profile: Profile, seed_material: bytes | None = No
     originals = tuple(page_text(page) for page in source)
     input_hash = sha256_hex(pdf)
     context = Context(
-        seed=derive_seed(input_hash, profile.sha256, seed_material), original_texts=originals
+        seed=derive_seed(input_hash, profile.sha256, seed_material),
+        original_texts=originals,
+        watermark_key=watermark_key,
     )
 
     current = pdf
@@ -75,6 +85,9 @@ def protect_bytes(pdf: bytes, profile: Profile, seed_material: bytes | None = No
     decoy_texts: tuple[str, ...] = ()
     decoy_answers: tuple[int, ...] | None = None
     applied: list[dict[str, Any]] = []
+    overlay_images = 0
+    overlay_cell_pt: int | None = None
+    pixel_tolerance = PIXEL_TOLERANCE
     for entry in profile.techniques:
         outcome = TECHNIQUES[entry.id](current, entry.params, context)
         current = outcome.pdf
@@ -85,9 +98,21 @@ def protect_bytes(pdf: bytes, profile: Profile, seed_material: bytes | None = No
             decoy_texts, decoy_answers = (), None
         if outcome.decoy_texts is not None:
             decoy_texts, decoy_answers = outcome.decoy_texts, outcome.decoy_answers
+        overlay_images += outcome.overlay_images
+        if outcome.pixel_tolerance is not None:
+            pixel_tolerance = outcome.pixel_tolerance
+        if outcome.overlay_images:
+            overlay_cell_pt = int(outcome.stats["cell_pt"])
         applied.append({"id": entry.id, "params": entry.params, "stats": outcome.stats})
 
-    expectation = Expectation(text=text, flattened_dpi=flattened_dpi, decoys=decoy_texts)
+    expectation = Expectation(
+        text=text,
+        flattened_dpi=flattened_dpi,
+        decoys=decoy_texts,
+        overlay_images=overlay_images,
+        pixel_tolerance=pixel_tolerance,
+        overlay_cell_pt=overlay_cell_pt,
+    )
     copies = tuple(page_text(page) for page in open_pdf_bytes(current))
     similarity = mean(
         [legibility(after, before) for before, after in zip(originals, copies, strict=True)]

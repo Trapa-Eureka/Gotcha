@@ -2,8 +2,8 @@
 
 An offline CLI that turns an exam document on your machine (PDF, Word) into a copy with the same content that is harder for AI to read and solve, and proves the effect with numbers stamped with a date and model versions.
 
-> **Status: early development (Phase 3 done).**
-> `protect` (makes the copies), `check` (checks the content is the same), and `verify` and `report` (measure the effect) work. Cloud model clients (OpenAI, Anthropic, Google) are included but have never been called with a real key. There are no scores from a real AI model yet; the only numbers so far are the text-extraction and OCR baselines.
+> **Status: early development (Phase 4 done).**
+> `protect` (makes the copies), `check` (checks the content is the same), `verify` and `report` (measure the effect) and `trace` (finds whose copy leaked) work. Cloud model clients (OpenAI, Anthropic, Google) are included but have never been called with a real key. There are no scores from a real AI model yet; the only numbers so far are the text-extraction and OCR baselines.
 > The free scope (Phases 1 to 5) is being built in order. Paid plans are still in planning.
 
 **Jump to:** [Quick start](#quick-start) · [**Usage**](USAGE.md) · [Installation](#installation) · [Roadmap](#roadmap) · [Spec](spec/README.md) · [한국어](README.md)
@@ -41,7 +41,7 @@ It is for teachers, exam writers and assessment bodies who hand out online exams
 | `examshield check` — checks that the original and the copy have the same content: page count, page size, picture count, text, rendering, OCR | Done |
 | `examshield auth` — keeps API keys in the OS keychain | Done (tested with a test keychain only, never written to a real OS keychain) |
 | Cloud model verification (your own key, off by default), confirmation before calls, `--offline` | Done (each vendor's SDK tested against a fake server only, no real call was made) |
-| Tracking watermark per examinee, `--copies`, `examshield trace` | To do (Phase 4) |
+| Tracking watermark per examinee, `--copies`, `examshield trace` | Done (recovered from PDFs and screenshot-quality pictures; checked with PDFs rendered to pictures, not real screen captures) |
 | Model drift warnings, `examshield profile` | To do (Phase 5) |
 | Scenario B (printed exam) profiles, watermark recovery from photos | Planned (paid) |
 | Single executable for air-gapped networks, commercial license, verified profile subscription | Planned (paid) |
@@ -134,6 +134,11 @@ After that, ruff, mypy and pytest run right before `git push`, and the push is b
 - A hidden decoy points at a randomly chosen number, without knowing the right answer. It can point at the right answer by chance. Whether a real AI follows the decoy has not been measured.
 - The rendering comparison in `check` uses MuPDF only. It cannot catch a case that looks different in another PDF viewer. A rasterized copy equals the original at its own resolution (200 dpi by default) and is blurrier than the original when zoomed further.
 - Word (.docx) input was tested only with a stand-in converter on a machine without LibreOffice. Whether LibreOffice turns the same file into the same PDF every time, and whether it stays off the network while converting, was not confirmed.
+- The tracking watermark is a faint background pattern. It survives screenshots, scaling, cropping and JPEG saving, but it is erased if brightness is raised until the background turns pure white. In that case `trace` names nobody. It also does not stop averaging several copies together, or a leak that retypes the text.
+- `trace` needs the untransformed original, the mapping table and the seed file. Photos of paper (perspective distortion) are not handled. That is in the planned paid scope.
+- Watermark recovery was checked with PDFs turned into pictures by MuPDF and poppler (72 to 220 dpi, partial crops, JPEG quality 60 and above). It was not checked with a real screen-capture tool or with pictures recompressed by a messenger.
+- How visible the watermark pattern is to people was not measured. It darkens the background by at most 6/255 (about 2%). A faint grid may show on some monitors.
+- For a watermarked copy, the tolerance of the rendering comparison in `check` widens from 2/255 to 8/255. In return, `check` verifies that the overlay on blank background has the shape of the watermark grid. Faint text laid over the page is caught; a change of 8/255 or less hidden on or at the edge of glyphs, and a picture drawn in whole pattern cells, are not.
 - The cloud model clients have never been called with a real key. The requests each vendor's SDK sends were only received and checked by a fake server on the same machine. The fake server's responses were written from memory, so real responses may differ.
 - Of the default model names (`gpt-6.2-sol`, `claude-opus-5-5`, `gemini-3.8-flash`), the OpenAI and Google ones are guesses picked from the names listed in the installed SDKs. Whether they are those vendors' flagship models was not confirmed. They can be changed with environment variables.
 - `protect` is slow on long documents. A 12-page licence PDF took about 20 seconds, most of it OCR.
@@ -163,7 +168,7 @@ The hooks exit with code 2 on failure, because that is what sends the failure te
 
 ## Data and privacy
 
-- Seed files and the examinee mapping table belong in `secrets/`. That folder, `*.seed` and `.env` are excluded by `.gitignore`. The institution keeps them itself.
+- Seed files and the examinee mapping table belong in `secrets/`. `protect --copies` refuses to put either inside the output folder. That folder, `*.seed` and `.env` are excluded by `.gitignore`. The institution keeps them itself.
 - The output folder (`out/`) and logs are not committed either.
 - Logs hold only file hashes, the profile name and the time. They never hold question text.
 
@@ -172,9 +177,10 @@ The hooks exit with code 2 on failure, because that is what sends the failure te
 ```
 Gotcha/
 ├── examshield/
-│   ├── cli.py         # Typer entry point: protect, check, verify, report, auth
+│   ├── cli.py         # Typer entry point: protect, check, verify, report, auth, trace
 │   ├── protect/       # pipeline, techniques/(rasterize, glyph_remap, decoy)
 │   ├── check/         # compare: structure, text, rendering, OCR
+│   ├── trace/         # detect: aligns a leak with the original and finds the examinee pattern
 │   ├── benchmark/     # item set (v1) and PDF rendering
 │   ├── profiles/      # profile YAML: none, none-print, a-*
 │   ├── verify/        # runner, capture_sim, metrics, report, models/
@@ -205,7 +211,7 @@ Each phase is reviewed and approved before the next one starts.
 - [x] **Phase 1** — `verify`: item set, capture simulation, baselines (text extraction, Tesseract), local model, report. Done when: the untransformed control group gets a score
 - [x] **Phase 2** — `protect` + `check`, scenario A profiles (rasterizing, glyph mapping scrambling, hidden decoys). Done when: output is deterministic and the zero-network tests pass
 - [x] **Phase 3** — `auth`, cloud model verification, `--offline`. Done when: running without a key explains what to do and exits, and the confirmation step before a call works
-- [ ] **Phase 4** — tracking watermark, `--copies`, `trace`. Done when: the examinee number is recovered from a PDF and from a screenshot-quality image
+- [x] **Phase 4** — tracking watermark, `--copies`, `trace`. Done when: the examinee number is recovered from a PDF and from a screenshot-quality image
 - [ ] **Phase 5** — model drift warnings, `report`, `profile`, finishing the docs. Done when: all tests pass
 - [ ] **Phase 6** — scenario B print profiles, calibration against real printing and photographing, watermark recovery from photos (planned, paid)
 - [ ] **Phase 7** — single executable for air-gapped networks, commercial license, profile subscription, web UI, HWP input (planned, paid)

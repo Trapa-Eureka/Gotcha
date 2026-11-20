@@ -10,7 +10,13 @@ from examshield.cli import app
 from tests.conftest import A_PROFILES
 
 PACKAGE = Path(__file__).resolve().parent.parent / "examshield"
-OFFLINE_ROOTS = ("examshield.protect.pipeline", "examshield.check.compare", "examshield.convert")
+OFFLINE_ROOTS = (
+    "examshield.protect.pipeline",
+    "examshield.protect.copies",
+    "examshield.check.compare",
+    "examshield.convert",
+    "examshield.trace.detect",
+)
 NETWORK_MODULES = {
     "socket",
     "ssl",
@@ -58,6 +64,38 @@ def test_protect_and_check_run_with_sockets_blocked(
 
     assert made.exit_code == 0, made.output
     assert checked.exit_code == 0, checked.output
+    assert no_sockets == []
+
+
+def test_copies_and_trace_run_with_sockets_blocked(
+    sample_file: Path, tmp_path: Path, no_sockets: list[str]
+) -> None:
+    runner = CliRunner()
+    seed = tmp_path / "exam.seed"
+    seed.write_bytes(b"0123456789abcdef-seed")
+    ids = tmp_path / "ids.csv"
+    ids.write_text("A1\nA2\n")
+    table = tmp_path / "map.csv"
+    out = tmp_path / "out"
+    made = runner.invoke(
+        app,
+        [
+            "protect", str(sample_file), "--out", str(out), "--profile", "a-full",
+            "--copies", str(ids), "--seed-file", str(seed), "--map-file", str(table),
+        ],
+    )  # fmt: skip
+    leaked = tmp_path / "leak.pdf"
+    leaked.write_bytes((out / "exam-A2.pdf").read_bytes() + b"\n")
+    traced = runner.invoke(
+        app,
+        [
+            "trace", str(leaked), "--original", str(sample_file),
+            "--map-file", str(table), "--seed-file", str(seed),
+        ],
+    )  # fmt: skip
+
+    assert made.exit_code == 0, made.output
+    assert traced.exit_code == 0 and "A2" in traced.output, traced.output
     assert no_sockets == []
 
 

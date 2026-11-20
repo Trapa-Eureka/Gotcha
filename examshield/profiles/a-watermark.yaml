@@ -1,0 +1,9 @@
+name: a-watermark
+scenario: A
+status: experimental
+description: 수험번호마다 다른 옅은 바탕 무늬를 넣는다. AI 판독을 막는 기법이 아니고, 유출된 파일이나 화면 캡처가 누구 것인지 찾는 용도다. --copies와 함께 쓴다.
+techniques:
+  - id: watermark
+    params:
+      cell_pt: 8
+      strength: 6
