@@ -1,4 +1,6 @@
+import csv
 import hashlib
+import io
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -36,6 +38,55 @@ SCENARIO_TECHNIQUES = {
 }
 
 
+# 쪽 번호(1부터) → 그 쪽에 있는 문항들의 정답 번호.
+AnswerKey = dict[int, frozenset[int]]
+MAX_CHOICE = 9
+
+
+def read_answer_key(path: Path) -> AnswerKey:
+    """정답표 CSV를 읽는다. 한 줄에 '쪽,정답' 하나. 한 쪽에 문항이 여럿이면 줄을 여러 개 쓴다."""
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as error:
+        raise ExamShieldError(f"정답표를 읽지 못했다: {path}") from error
+    key: dict[int, set[int]] = {}
+    for number, row in enumerate(csv.reader(io.StringIO(text)), start=1):
+        cells = [cell.strip() for cell in row]
+        if not any(cells):
+            continue
+        if number == 1 and not cells[0].isdigit():
+            continue
+        if len(cells) < 2 or not cells[0].isdigit() or not cells[1].isdigit():
+            raise ExamShieldError(
+                f"{path.name} {number}번째 줄: '쪽,정답' 형식이어야 한다. 예: 3,2"
+            )
+        page, answer = int(cells[0]), int(cells[1])
+        if page < 1 or not 1 <= answer <= MAX_CHOICE:
+            raise ExamShieldError(
+                f"{path.name} {number}번째 줄: 쪽은 1 이상, 정답은 1~{MAX_CHOICE}이어야 한다."
+            )
+        key.setdefault(page, set()).add(answer)
+    if not key:
+        raise ExamShieldError(f"정답표가 비어 있다: {path}")
+    return {page: frozenset(answers) for page, answers in key.items()}
+
+
+def _avoid(
+    answer_key: AnswerKey | None, pages: int, profile: Profile
+) -> tuple[frozenset[int], ...] | None:
+    if answer_key is None:
+        return None
+    if not any(entry.id == "decoy" for entry in profile.techniques):
+        raise ExamShieldError(
+            f"프로파일 '{profile.name}'에는 미끼가 없어 정답표를 쓸 곳이 없다. "
+            "a-remap-decoy나 a-full과 함께 쓴다."
+        )
+    beyond = sorted(page for page in answer_key if page > pages)
+    if beyond:
+        raise ExamShieldError(f"정답표에 문서에 없는 쪽이 있다: {beyond[0]}쪽 (문서는 {pages}쪽)")
+    return tuple(answer_key.get(page, frozenset()) for page in range(1, pages + 1))
+
+
 @dataclass(frozen=True)
 class Protected:
     pdf: bytes
@@ -53,6 +104,7 @@ def protect_bytes(
     profile: Profile,
     seed_material: bytes | None = None,
     watermark_key: bytes | None = None,
+    answer_key: AnswerKey | None = None,
 ) -> Protected:
     unknown = [entry.id for entry in profile.techniques if entry.id not in TECHNIQUES]
     if unknown:
@@ -91,6 +143,7 @@ def protect_bytes(
         seed=derive_seed(input_hash, profile.sha256, seed_material),
         original_texts=originals,
         watermark_key=watermark_key,
+        avoid_answers=_avoid(answer_key, len(originals), profile),
     )
 
     current = pdf
@@ -141,6 +194,8 @@ def protect_bytes(
         "tool_version": __version__,
         "profile": {"name": profile.name, "sha256": profile.sha256},
         "seed": "file" if seed_material is not None else "default",
+        # 정답표를 썼는지만 적는다. 정답 자체는 기록에 남기지 않는다.
+        "answer_key": answer_key is not None,
         "input_sha256": input_hash,
         "output_sha256": sha256_hex(current),
         "pages": len(originals),
@@ -155,9 +210,13 @@ def protect_bytes(
 
 
 def protect_and_check(
-    pdf: bytes, profile: Profile, seed_material: bytes | None = None, ocr: Ocr | None = None
+    pdf: bytes,
+    profile: Profile,
+    seed_material: bytes | None = None,
+    ocr: Ocr | None = None,
+    answer_key: AnswerKey | None = None,
 ) -> tuple[Protected, CheckResult]:
-    protected = protect_bytes(pdf, profile, seed_material)
+    protected = protect_bytes(pdf, profile, seed_material, None, answer_key)
     result = compare(pdf, protected.pdf, protected.expectation, ocr)
     protected.record["check"] = result.as_dict()
     return protected, result

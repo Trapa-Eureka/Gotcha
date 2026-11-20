@@ -257,6 +257,8 @@ def record_refusal(report: dict[str, Any], now: datetime | None = None) -> str |
         return str(error)
     if isinstance(report, dict) and report.get("channels_limited"):
         return "경로를 골라서 잰 결과다. 재지 않은 경로가 있다."
+    if isinstance(report, dict) and report.get("answer_key"):
+        return "정답표를 준 것처럼 잰 결과다."
     if checked.benchmark_version == "custom":
         return "내장 문항 세트로 잰 결과가 아니다."
     if not measured_by_ai(checked):

@@ -126,6 +126,7 @@ def run_verification(
     skipped: list[Skipped] | None = None,
     transform: Transform | None = None,
     only: tuple[str, ...] | None = None,
+    answer_key: bool = False,
 ) -> dict[str, Any]:
     if isinstance(subject, ItemSet):
         subject = builtin_subject(subject)
@@ -176,6 +177,10 @@ def run_verification(
             f"경로를 골라서 쟀다({', '.join(channels)}). 재지 않은 경로가 있어 프로파일의 "
             "검증 기록으로는 쓰지 않는다."
         )
+    if answer_key:
+        notes.append(
+            "정답표를 준 것처럼 쟀다. 미끼가 정답을 가리키지 않는다. 검증 기록으로는 쓰지 않는다."
+        )
     refusals = sum(row["refusals"] for row in results)
     if refusals:
         notes.append(
@@ -198,6 +203,7 @@ def run_verification(
         },
         "simulation": conditions.as_dict() if conditions else None,
         "channels_limited": limited,
+        "answer_key": answer_key,
         "protection": protection,
         "models": [
             {

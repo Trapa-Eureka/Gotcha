@@ -43,6 +43,29 @@ def subset_font(text: str) -> bytes:
     return buffer.getvalue()
 
 
+def pick_answers(context: Context, stream: SeedStream, fallback: int) -> tuple[list[int], int]:
+    """쪽마다 미끼가 가리킬 번호를 고른다. 정답표가 있으면 그 쪽의 정답은 피한다.
+
+    정답표가 없을 때는 예전과 같은 번호가 나온다. 한 쪽의 문항들이 모든 번호를 정답으로 쓰면
+    피할 수 없으므로 아무 번호나 고르고, 그런 쪽의 수를 함께 돌려준다.
+    """
+    avoid = context.avoid_answers
+    if avoid is not None and len(avoid) != len(context.original_texts):
+        raise ExamShieldError("정답표의 쪽수가 문서의 쪽수와 다르다.")
+    answers: list[int] = []
+    unavoidable = 0
+    for index, original in enumerate(context.original_texts):
+        count = choice_count(original, fallback)
+        allowed = [
+            number for number in range(1, count + 1) if avoid is None or number not in avoid[index]
+        ]
+        if not allowed:
+            unavoidable += 1
+            allowed = list(range(1, count + 1))
+        answers.append(allowed[stream.below(len(allowed))])
+    return answers, unavoidable
+
+
 def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
     template = str(params.get("template", DEFAULT_TEMPLATE))
     fallback = int(params.get("choices", DEFAULT_CHOICES))
@@ -50,9 +73,7 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         raise ExamShieldError("decoy의 template에는 {answer}가, choices에는 2~9가 있어야 한다.")
     doc = open_pdf_bytes(pdf)
     stream = SeedStream(context.seed, "decoy")
-    answers = [
-        stream.below(choice_count(original, fallback)) + 1 for original in context.original_texts
-    ]
+    answers, unavoidable = pick_answers(context, stream, fallback)
     texts = [template.replace("{answer}", str(answer)) for answer in answers]
     font = subset_font("".join(texts))
     for page, text in zip(doc, texts, strict=True):
@@ -68,7 +89,11 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         )
     return Outcome(
         pdf=save_deterministic(doc),
-        stats={"pages": len(texts)},
+        stats={
+            "pages": len(texts),
+            "answer_key": context.avoid_answers is not None,
+            "pages_where_every_choice_is_an_answer": unavoidable,
+        },
         decoy_texts=tuple(texts),
         decoy_answers=tuple(answers),
     )

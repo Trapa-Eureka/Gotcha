@@ -10,6 +10,8 @@ class Context:
     seed: bytes
     original_texts: tuple[str, ...]
     watermark_key: bytes | None = None
+    # 쪽마다 미끼가 가리키면 안 되는 번호(그 쪽에 있는 문항들의 정답). 정답표가 없으면 None.
+    avoid_answers: tuple[frozenset[int], ...] | None = None
 
 
 @dataclass(frozen=True)

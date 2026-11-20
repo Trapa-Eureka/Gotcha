@@ -8,7 +8,14 @@ from pathlib import Path
 from examshield.check.compare import CheckResult, Expectation, Ocr, compare
 from examshield.errors import ExamShieldError
 from examshield.profiles import Profile
-from examshield.protect.pipeline import KEYED, TECHNIQUES, Protected, protect_bytes, sha256_hex
+from examshield.protect.pipeline import (
+    KEYED,
+    TECHNIQUES,
+    AnswerKey,
+    Protected,
+    protect_bytes,
+    sha256_hex,
+)
 from examshield.protect.techniques import dots, watermark
 from examshield.protect.techniques.base import Context
 
@@ -90,14 +97,19 @@ class Copy:
 
 
 def protect_copies(
-    pdf: bytes, profile: Profile, seed: bytes, examinee_ids: list[str], ocr: Ocr | None = None
+    pdf: bytes,
+    profile: Profile,
+    seed: bytes,
+    examinee_ids: list[str],
+    ocr: Ocr | None = None,
+    answer_key: AnswerKey | None = None,
 ) -> tuple[CheckResult, Iterator[Copy]]:
     """워터마크 전 단계는 한 번만 만들고 검사한다. 그 위에 수험번호별 무늬만 따로 덧씌운다."""
     kind, params = keyed_technique(profile)
     base_profile = replace(
         profile, techniques=tuple(e for e in profile.techniques if e.id not in KEYED)
     )
-    base = protect_bytes(pdf, base_profile, seed)
+    base = protect_bytes(pdf, base_profile, seed, None, answer_key)
     base_check = compare(pdf, base.pdf, base.expectation, ocr)
 
     def make() -> Iterator[Copy]:

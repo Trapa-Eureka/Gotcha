@@ -239,3 +239,49 @@ def test_a_full_run_is_not_marked_as_channel_limited() -> None:
     report = control_report()
 
     assert report["channels_limited"] is False
+
+
+def test_avoid_answers_measures_the_profile_as_if_a_key_was_given(tmp_path: Path) -> None:
+    def run(*extra: str) -> dict[str, Any]:
+        folder = tmp_path / ("keyed" if extra else "plain")
+        result = CliRunner().invoke(
+            app,
+            [
+                "verify",
+                "--profile",
+                "a-remap-decoy",
+                "--models",
+                "mock",
+                "--out",
+                str(folder),
+                *extra,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return dict(json.loads(next(folder.glob("*.json")).read_text(encoding="utf-8")))
+
+    plain, keyed = run(), run("--avoid-answers")
+    score = {
+        name: next(
+            row
+            for row in report["results"]
+            if row["variant"] == "protected" and row["model"] == "mock-reader"
+        )
+        for name, report in (("plain", plain), ("keyed", keyed))
+    }
+
+    # 모의 모델은 미끼를 그대로 따른다. 미끼가 정답을 피하면 한 문항도 못 맞힌다.
+    assert score["plain"]["accuracy"] > 0 and score["plain"]["decoy_items"] < 12
+    assert score["keyed"]["accuracy"] == 0.0 and score["keyed"]["decoy_items"] == 12
+    assert keyed["answer_key"] is True and plain["answer_key"] is False
+    assert record_refusal(keyed) is not None
+
+
+def test_avoid_answers_cannot_be_recorded_or_used_with_a_custom_file(
+    sample_file: Path, tmp_path: Path
+) -> None:
+    base = ["verify", "--profile", "a-decoy", "--models", "mock", "--out", str(tmp_path / "r")]
+
+    custom = CliRunner().invoke(app, [*base, "--avoid-answers", "--allow-custom", str(sample_file)])
+
+    assert custom.exit_code == 2 and "내장 문항" in custom.stderr

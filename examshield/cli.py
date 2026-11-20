@@ -30,11 +30,13 @@ from examshield.protect.copies import (
     write_map,
 )
 from examshield.protect.pipeline import (
+    AnswerKey,
     append_log,
     job_path,
     load_expectation,
     protect_and_check,
     protect_bytes,
+    read_answer_key,
     write_outputs,
 )
 from examshield.providers import PROVIDERS, Provider, get_provider
@@ -266,6 +268,11 @@ def verify(
         "--channels",
         help="잴 경로를 고른다. text, image, file을 쉼표로 잇는다. 없으면 프로파일이 재는 경로 전부.",
     ),
+    avoid_answers: bool = typer.Option(
+        False,
+        "--avoid-answers",
+        help="내장 문항의 정답을 정답표로 써서, protect --answer-key를 준 것처럼 잰다.",
+    ),
     record: bool = typer.Option(
         False,
         "--record",
@@ -306,6 +313,19 @@ def verify(
             subject = custom_subject(allow_custom.read_bytes())
         else:
             subject = builtin_subject(load_items())
+        key: AnswerKey | None = None
+        if avoid_answers:
+            if subject.custom:
+                raise ExamShieldError("--avoid-answers는 정답을 아는 내장 문항 세트에만 쓴다.")
+            if record:
+                raise ExamShieldError(
+                    "--record는 --avoid-answers와 함께 쓸 수 없다. 검증 기록은 정답표 없이 잰다."
+                )
+            key = {
+                page: frozenset({truth.answer})
+                for page, truth in enumerate(subject.truths, start=1)
+                if truth.answer is not None
+            }
         if cloud:
             _confirm_cloud(loaded, subject, cloud, yes, only)
         report = run_verification(
@@ -315,7 +335,8 @@ def verify(
             now=datetime.now().astimezone(),
             skipped=skipped,
             # 워터마크가 든 프로파일은 고정된 가짜 번호의 무늬로 잰다. 무늬가 판독에 주는 영향을 보기 위해서다.
-            transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY),
+            transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY, key),
+            answer_key=key is not None,
             only=only,
         )
         path = write_report(report, out)
@@ -480,6 +501,11 @@ def protect(
         "--copies",
         help="수험번호 CSV. 번호마다 고유 워터마크가 든 복사본을 만든다. --seed-file이 필요하다.",
     ),
+    answer_key: Path | None = typer.Option(
+        None,
+        "--answer-key",
+        help="정답표 CSV('쪽,정답'). 미끼가 그 쪽의 정답을 가리키지 않게 한다. 출력 폴더 안은 안 된다.",
+    ),
     map_file: Path | None = typer.Option(
         None,
         "--map-file",
@@ -491,8 +517,16 @@ def protect(
     try:
         loaded = load_profile(profile)
         sources = _inputs(source)
+        answers = None
+        if answer_key is not None:
+            if len(sources) != 1:
+                raise ExamShieldError("--answer-key는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
+            # S5와 같은 이유다. 정답표가 배포하는 폴더에 섞여 나가면 안 된다.
+            if _inside(answer_key, out):
+                raise ExamShieldError(f"정답표를 출력 폴더 안에 둘 수 없다: {answer_key}")
+            answers = read_answer_key(answer_key)
         if copies is not None:
-            _protect_copies(sources, out, loaded, seed_file, force, copies, map_file)
+            _protect_copies(sources, out, loaded, seed_file, force, copies, map_file, answers)
             return
         if map_file is not None:
             raise ExamShieldError("--map-file은 --copies와 함께 쓴다.")
@@ -515,7 +549,7 @@ def protect(
         for path in sources:
             original = read_document(path, out)
             protected, result = protect_and_check(
-                original, loaded, seed, engine.read if engine else None
+                original, loaded, seed, engine.read if engine else None, answers
             )
             append_log(out, protected, result.passed, datetime.now().astimezone())
             if not result.passed:
@@ -582,6 +616,7 @@ def _protect_copies(
     force: bool,
     copies: Path,
     map_file: Path | None,
+    answers: AnswerKey | None = None,
 ) -> None:
     if len(sources) != 1:
         raise ExamShieldError("--copies는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
@@ -625,7 +660,9 @@ def _protect_copies(
     write_map(table, [])
     engine = find_tesseract()
     original = read_document(source, out)
-    base_check, made = protect_copies(original, profile, seed, ids, engine.read if engine else None)
+    base_check, made = protect_copies(
+        original, profile, seed, ids, engine.read if engine else None, answers
+    )
     if not base_check.passed:
         typer.echo(f"{source.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
         typer.echo(format_result(base_check), err=True)

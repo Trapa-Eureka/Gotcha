@@ -396,3 +396,112 @@ def test_license_command_names_the_license_and_the_source() -> None:
         "AGPL-3.0-or-later" in result.stdout and "github.com/Trapa-Eureka/Gotcha" in result.stdout
     )
     assert "PyMuPDF" in result.stdout
+
+
+def answer_file(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "answers.csv"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_decoys_avoid_the_answers_in_the_key(sample_pdf: bytes) -> None:
+    profile = load_profile("a-remap-decoy")
+    plain = protect_bytes(sample_pdf, profile)
+    assert plain.decoy_answers is not None
+    # 정답표 없이 고른 미끼 번호를 그대로 정답으로 삼는다. 정답표를 주면 전부 달라져야 한다.
+    key = {page: frozenset({answer}) for page, answer in enumerate(plain.decoy_answers, start=1)}
+
+    keyed = protect_bytes(sample_pdf, profile, None, None, key)
+    again = protect_bytes(sample_pdf, profile, None, None, key)
+
+    assert keyed.decoy_answers is not None
+    assert all(a != b for a, b in zip(keyed.decoy_answers, plain.decoy_answers, strict=True))
+    assert all(1 <= answer <= 4 for answer in keyed.decoy_answers)
+    assert keyed.pdf == again.pdf
+    assert keyed.record["answer_key"] is True and plain.record["answer_key"] is False
+
+
+def test_without_a_key_the_copy_is_what_it_always_was(sample_pdf: bytes) -> None:
+    profile = load_profile("a-decoy")
+
+    assert (
+        protect_bytes(sample_pdf, profile).pdf
+        == protect_bytes(sample_pdf, profile, None, None, None).pdf
+    )
+    assert protect_bytes(sample_pdf, profile, None, None, {}).decoy_answers == (
+        protect_bytes(sample_pdf, profile).decoy_answers
+    )
+
+
+def test_a_page_where_every_choice_is_an_answer_is_counted(sample_pdf: bytes) -> None:
+    key = {1: frozenset({1, 2, 3, 4}), 2: frozenset({1, 2, 3})}
+
+    protected = protect_bytes(sample_pdf, load_profile("a-decoy"), None, None, key)
+    stats = protected.record["techniques"][0]["stats"]
+
+    assert stats["pages_where_every_choice_is_an_answer"] == 1
+    assert protected.decoy_answers is not None and protected.decoy_answers[1] == 4
+
+
+def test_the_answers_never_reach_the_job_record_or_the_log(
+    sample_file: Path, tmp_path: Path
+) -> None:
+    key = answer_file(tmp_path, "쪽,정답\n1,3\n2,1\n3,2\n")
+    out = tmp_path / "out"
+
+    code, output = run_protect(sample_file, out, "a-remap-decoy", "--answer-key", str(key))
+    record = json.loads((out / "exam.job.json").read_text(encoding="utf-8"))
+
+    assert code == 0, output
+    assert record["answer_key"] is True
+    assert record["decoy_answers"][0] != 3 and record["decoy_answers"][1] != 1
+    assert record["decoy_answers"][2] != 2
+    written = "".join(path.read_text(encoding="utf-8") for path in out.glob("*.json*"))
+    assert "answers.csv" not in written and '"3,2"' not in written
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("", "비어 있다"),
+        ("쪽,정답\n", "비어 있다"),
+        ("1,x\n", "형식"),
+        ("1\n", "형식"),
+        ("0,1\n", "1 이상"),
+        ("1,0\n", "1~9"),
+        ("1,10\n", "1~9"),
+        ("9,1\n", "문서에 없는 쪽"),
+    ],
+)
+def test_bad_answer_keys_are_refused(
+    text: str, message: str, sample_file: Path, tmp_path: Path
+) -> None:
+    key = answer_file(tmp_path, text)
+
+    code, output = run_protect(sample_file, tmp_path / "out", "a-decoy", "--answer-key", str(key))
+
+    assert code == 2 and message in output
+    assert not (tmp_path / "out" / "exam.pdf").exists()
+
+
+def test_answer_key_needs_a_decoy_profile_and_must_stay_out_of_the_output(
+    sample_file: Path, tmp_path: Path
+) -> None:
+    key = answer_file(tmp_path, "1,3\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    inside = out / "answers.csv"
+    inside.write_text("1,3\n", encoding="utf-8")
+
+    no_decoy = run_protect(sample_file, tmp_path / "o1", "a-glyph-remap", "--answer-key", str(key))
+    leaked = run_protect(sample_file, out, "a-decoy", "--answer-key", str(inside))
+    missing = run_protect(
+        sample_file, tmp_path / "o2", "a-decoy", "--answer-key", str(tmp_path / "x")
+    )
+    (sample_file.parent / "second.pdf").write_bytes(sample_file.read_bytes())
+    folder = run_protect(sample_file.parent, tmp_path / "o3", "a-decoy", "--answer-key", str(key))
+
+    assert no_decoy[0] == 2 and "미끼가 없어" in no_decoy[1]
+    assert leaked[0] == 2 and "출력 폴더 안" in leaked[1]
+    assert missing[0] == 2 and "읽지 못했다" in missing[1]
+    assert folder[0] == 2 and "파일 하나" in folder[1]
