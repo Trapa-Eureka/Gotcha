@@ -10,13 +10,14 @@ import pytest
 from examshield.errors import ModelUnavailableError, NetworkRefusedError
 from examshield.netguard import OFFLINE_ENV, is_loopback, require_network
 from examshield.verify.models.base import IMAGE, TEXT, PageInput
-from examshield.verify.models.local import OllamaModel
+from examshield.verify.models.local import OllamaModel, is_relayed
 
 PAGE = PageInput(text="1. 문제\n① 가 ② 나", image_png=b"\x89PNG-fake", choice_count=4)
 
 
 class FakeOllama(BaseHTTPRequestHandler):
     capabilities: list[str] = ["completion", "vision"]
+    remote_host: str = ""
     requests: list[dict[str, Any]] = []
 
     def log_message(self, *args: object) -> None:
@@ -36,7 +37,10 @@ class FakeOllama(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if self.path == "/api/show":
-            self._send({"capabilities": type(self).capabilities})
+            shown: dict[str, Any] = {"capabilities": type(self).capabilities}
+            if type(self).remote_host:
+                shown["remote_host"] = type(self).remote_host
+            self._send(shown)
             return
         type(self).requests.append(body)
         self._send({"response": "1. 문제\n① 가 ② 나\n정답: 2"})
@@ -46,6 +50,7 @@ class FakeOllama(BaseHTTPRequestHandler):
 def fake_ollama() -> Iterator[str]:
     FakeOllama.requests = []
     FakeOllama.capabilities = ["completion", "vision"]
+    FakeOllama.remote_host = ""
     server = HTTPServer(("127.0.0.1", 0), FakeOllama)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -123,3 +128,30 @@ def test_network_is_allowed_when_offline_is_not_set(monkeypatch: pytest.MonkeyPa
     monkeypatch.delenv(OFFLINE_ENV, raising=False)
 
     require_network("api.example.com", "테스트")
+
+
+def test_offline_setting_refuses_a_model_that_ollama_relays_to_a_remote_server(
+    fake_ollama: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    FakeOllama.remote_host = "https://ollama.example.com"
+    monkeypatch.setenv(OFFLINE_ENV, "1")
+
+    with pytest.raises(NetworkRefusedError, match="중계"):
+        OllamaModel(base_url=fake_ollama)
+
+
+def test_relayed_model_is_labelled_when_offline_is_not_set(
+    fake_ollama: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    FakeOllama.remote_host = "https://ollama.example.com"
+    monkeypatch.delenv(OFFLINE_ENV, raising=False)
+    info = OllamaModel(base_url=fake_ollama).info
+
+    assert info.kind == "relayed"
+    assert "밖으로" in info.note
+
+
+def test_cloud_suffix_counts_as_relayed() -> None:
+    assert is_relayed("big-model:cloud", {})
+    assert is_relayed("big-model-cloud", {})
+    assert not is_relayed("fake-vision:latest", {})

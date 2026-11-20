@@ -3,6 +3,7 @@ from typing import Protocol
 
 TEXT = "text"
 IMAGE = "image"
+FILE = "file"
 
 PROMPT = (
     "다음은 시험 문항 한 개다.\n"
@@ -16,12 +17,14 @@ class PageInput:
     text: str
     image_png: bytes
     choice_count: int
+    pdf: bytes = b""
 
 
 @dataclass(frozen=True)
 class ModelReply:
     transcription: str
     answer: int | None
+    refused: bool = False
 
 
 @dataclass(frozen=True)

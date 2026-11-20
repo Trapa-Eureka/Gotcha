@@ -4,11 +4,12 @@ import os
 from examshield.errors import NetworkRefusedError
 
 OFFLINE_ENV = "EXAMSHIELD_OFFLINE"
-_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"", "0", "false", "no", "off"}
 
 
 def offline_enabled() -> bool:
-    return os.environ.get(OFFLINE_ENV, "").strip().lower() in _TRUE_VALUES
+    # 모르는 값은 켜진 것으로 본다. 오타 때문에 꺼진 채로 도는 일을 막는다.
+    return os.environ.get(OFFLINE_ENV, "").strip().lower() not in _FALSE_VALUES
 
 
 def is_loopback(host: str) -> bool:

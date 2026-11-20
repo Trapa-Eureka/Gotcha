@@ -1,0 +1,8 @@
+name: a-rasterize
+scenario: A
+status: experimental
+description: 쪽을 그림으로 바꿔 텍스트 레이어를 없앤다. 복사와 텍스트 추출을 막는다. 그림을 읽는 비전 모델에는 효과가 없을 것으로 본다.
+techniques:
+  - id: rasterize
+    params:
+      dpi: 200

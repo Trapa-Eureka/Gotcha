@@ -39,3 +39,10 @@ def render_gray(page: Any, dpi: int) -> GrayImage:
 
 def normalize_text(text: str) -> str:
     return _WHITESPACE.sub(" ", unicodedata.normalize("NFKC", text)).strip()
+
+
+def render_rgb(page: Any, dpi: int) -> NDArray[np.uint8]:
+    pix = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
+    flat = np.frombuffer(pix.samples, dtype=np.uint8)
+    rows = flat.reshape(pix.height, pix.stride)
+    return np.ascontiguousarray(rows[:, : pix.width * 3]).reshape(pix.height, pix.width, 3)

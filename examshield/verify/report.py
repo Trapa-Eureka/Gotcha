@@ -5,7 +5,7 @@ from typing import Any
 from examshield.errors import ExamShieldError
 
 REQUIRED_KEYS = ("created_at", "tool_version", "profile", "benchmark", "models", "results")
-CHANNEL_LABELS = {"text": "텍스트 레이어", "image": "이미지"}
+CHANNEL_LABELS = {"text": "텍스트 레이어", "image": "이미지", "file": "PDF 파일"}
 VARIANT_LABELS = {"control": "대조군", "protected": "변환본"}
 
 

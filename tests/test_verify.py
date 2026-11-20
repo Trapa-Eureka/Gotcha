@@ -11,6 +11,7 @@ from examshield.benchmark import load_items
 from examshield.cli import app
 from examshield.errors import ExamShieldError
 from examshield.profiles import load_profile, parse_profile
+from examshield.protect.pipeline import protect_bytes
 from examshield.verify.models.base import ModelClient
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.mock import MockModel
@@ -140,18 +141,56 @@ def test_cli_verify_writes_a_report_and_report_command_reads_it(tmp_path: Path) 
     assert "mock-reader" in shown.output
 
 
-def test_cli_refuses_cloud_models_for_now(tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        app, ["verify", "--profile", "none", "--models", "cloud", "--out", str(tmp_path)]
-    )
-
-    assert result.exit_code == 2
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_cli_unknown_profile_exits_with_code_2(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app, ["verify", "--profile", "nope", "--models", "mock", "--out", str(tmp_path)]
     )
 
     assert result.exit_code == 2
+
+
+def protected_report(profile_name: str) -> dict[str, Any]:
+    item_set = load_items()
+    profile = load_profile(profile_name)
+    models: list[ModelClient] = [TextLayerModel(), MockModel(item_set.items)]
+    return run_verification(
+        profile, item_set, models, now=NOW, transform=lambda pdf: protect_bytes(pdf, profile)
+    )
+
+
+def rows_for(report: dict[str, Any], model: str) -> dict[str, dict[str, Any]]:
+    return {row["variant"]: row for row in report["results"] if row["model"] == model}
+
+
+def test_scrambled_profile_is_measured_next_to_the_control_group() -> None:
+    report = protected_report("a-glyph-remap")
+    text_layer = rows_for(report, "text-layer")
+    reader = rows_for(report, "mock-reader")
+
+    assert text_layer["control"]["legibility"] == 1.0
+    assert text_layer["protected"]["legibility"] < 0.5
+    assert reader["control"]["accuracy"] == 1.0
+    assert reader["protected"]["accuracy"] == 0.0
+    assert reader["protected"]["decoy_hit_rate"] is None
+    assert report["protection"]["techniques"][0]["id"] == "glyph_remap"
+    assert report["notes"] == []
+
+
+def test_decoy_hit_rate_counts_only_items_where_the_decoy_is_wrong() -> None:
+    report = protected_report("a-decoy")
+    reader = rows_for(report, "mock-reader")
+
+    assert reader["control"]["decoy_hit_rate"] is None
+    assert reader["protected"]["decoy_hit_rate"] == 1.0
+    assert 0 < reader["protected"]["decoy_items"] <= 12
+    assert reader["protected"]["accuracy"] == (12 - reader["protected"]["decoy_items"]) / 12
+    assert rows_for(report, "text-layer")["protected"]["decoy_hit_rate"] is None
+
+
+def test_cli_verify_measures_a_profile_with_techniques(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app, ["verify", "--profile", "a-remap-decoy", "--models", "mock", "--out", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "변환본" in result.output

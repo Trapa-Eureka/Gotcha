@@ -69,4 +69,6 @@ def render_items_pdf(items: tuple[Item, ...]) -> bytes:
         )
         if leftover < 0:
             raise ExamShieldError(f"문항 {item.id}이(가) 한 쪽에 들어가지 않는다.")
+    # 쓰는 글자만 남긴다. 쪽 하나를 통째로 모델에 올릴 때 파일이 작아야 한다.
+    doc.subset_fonts()
     return save_deterministic(doc)

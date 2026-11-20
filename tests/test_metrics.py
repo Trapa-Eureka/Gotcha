@@ -50,3 +50,11 @@ def test_strip_answer_line_removes_only_the_answer_line() -> None:
 def test_mean_of_nothing_is_none() -> None:
     assert mean([]) is None
     assert mean([0.5, 1.0]) == 0.75
+
+
+def test_long_text_uses_the_fast_measure_and_still_separates_same_from_scrambled() -> None:
+    long_text = "가나다라마바사아자차카타파하 " * 100
+
+    assert legibility(long_text, long_text) == 1.0
+    assert legibility(long_text[::-1].replace("가", "힣"), long_text) < 0.5
+    assert legibility("", long_text) == 0.0

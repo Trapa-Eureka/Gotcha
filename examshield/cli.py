@@ -1,18 +1,42 @@
+import importlib
+import os
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 
 import typer
 
+from examshield.auth.keys import delete_key, find_key, setup_help, store_key, usable
 from examshield.benchmark import load_items
+from examshield.check.compare import Expectation, compare, format_result
+from examshield.convert import SUPPORTED_SUFFIXES, read_document
 from examshield.errors import ExamShieldError, ModelUnavailableError
-from examshield.profiles import load_profile
+from examshield.netguard import OFFLINE_ENV, offline_enabled
+from examshield.ocr import find_tesseract
+from examshield.profiles import Profile, load_profile
+from examshield.protect.pipeline import (
+    append_log,
+    job_path,
+    load_expectation,
+    protect_and_check,
+    protect_bytes,
+    write_outputs,
+)
+from examshield.providers import PROVIDERS, Provider, get_provider
 from examshield.verify.models.base import ModelClient
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
+from examshield.verify.models.cloud import chosen_model
 from examshield.verify.models.local import OllamaModel
 from examshield.verify.models.mock import MockModel
 from examshield.verify.report import format_report, load_report, write_report
-from examshield.verify.runner import Skipped, run_verification
+from examshield.verify.runner import (
+    Skipped,
+    Subject,
+    builtin_subject,
+    custom_subject,
+    estimate_calls,
+    run_verification,
+)
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -47,9 +71,101 @@ def _local_models(local_model: str | None) -> tuple[list[ModelClient], list[Skip
     return models, skipped
 
 
-@app.command(help="내장 문항 세트로 프로파일의 저항 효과를 측정하고 리포트를 쓴다.")
+CLOUD_CLASSES = {
+    "openai": ("examshield.verify.models.openai", "OpenAIModel"),
+    "anthropic": ("examshield.verify.models.anthropic", "AnthropicModel"),
+    "google": ("examshield.verify.models.google", "GoogleModel"),
+}
+auth_app = typer.Typer(no_args_is_help=True, help="클라우드 모델용 API 키를 OS 키체인에 보관한다.")
+app.add_typer(auth_app, name="auth")
+
+
+@app.callback()
+def main(
+    offline: bool = typer.Option(
+        False,
+        "--offline",
+        help=f"이 PC 밖으로 나가는 접속을 모두 거부한다. 환경변수 {OFFLINE_ENV}=1과 같다.",
+    ),
+) -> None:
+    if offline:
+        os.environ[OFFLINE_ENV] = "1"
+
+
+def _cloud_model(provider: Provider) -> ModelClient | Skipped:
+    key = find_key(provider)
+    if key is None:
+        return Skipped(provider.id, "API 키가 없다. " + setup_help(provider))
+    if not usable(key.value):
+        return Skipped(provider.id, f"{key.source}의 키에 한글이나 공백 같은 글자가 섞여 있다.")
+    module_name, class_name = CLOUD_CLASSES[provider.id]
+    try:
+        module = importlib.import_module(module_name)
+        client: ModelClient = getattr(module, class_name)(key)
+    except ImportError:
+        return Skipped(
+            provider.id,
+            f"{provider.package} 패키지가 없다. `uv sync --extra cloud` 또는 "
+            "`uv tool install 'examshield[cloud]'`로 설치한다.",
+        )
+    return client
+
+
+OFFLINE_REASON = (
+    f"오프라인 설정({OFFLINE_ENV} 또는 --offline)이 켜져 있어 클라우드 모델을 부르지 않는다. "
+    "API 키가 있어도 마찬가지다."
+)
+
+
+def _cloud_models() -> tuple[list[ModelClient], list[Skipped]]:
+    if offline_enabled():
+        return [], [Skipped("cloud", OFFLINE_REASON)]
+    models: list[ModelClient] = []
+    skipped: list[Skipped] = []
+    for provider in PROVIDERS:
+        made = _cloud_model(provider)
+        if isinstance(made, Skipped):
+            skipped.append(made)
+        else:
+            models.append(made)
+    return models, skipped
+
+
+def _confirm_cloud(
+    profile: Profile, subject: Subject, models: list[ModelClient], yes: bool
+) -> None:
+    pages = len(subject.truths)
+    copies = 2 if profile.techniques else 1
+    what = (
+        "사용자가 --allow-custom으로 준 파일"
+        if subject.custom
+        else f"내장 문항 세트 {subject.version}"
+    )
+    typer.echo("클라우드 모델을 호출한다. 아래 내용이 이 PC 밖으로 나간다.")
+    typer.echo(
+        f"  보낼 문서: {what}, {pages}쪽 × {copies}벌(대조군{', 변환본' if copies == 2 else ''})"
+    )
+    total = 0
+    for model in models:
+        calls = estimate_calls(profile, pages, model)
+        total += calls
+        company = get_provider(model.info.provider).company
+        typer.echo(f"  대상: {company} ({model.info.name}), 예상 호출 {calls}건")
+    typer.echo(f"  예상 호출 수 합계: {total}건. 요금은 각 회사가 사용자 키에 청구한다.")
+    if subject.custom:
+        typer.echo(
+            "  주의: 이 파일의 내용이 위 회사들의 서버로 전송된다. 실제 시험지는 보내지 않는다."
+        )
+    if yes:
+        return
+    if not typer.confirm("계속할까?", default=False):
+        typer.echo("취소했다. 아무것도 보내지 않았다.", err=True)
+        raise typer.Exit(1)
+
+
+@app.command(help="프로파일의 저항 효과를 측정하고 리포트를 쓴다. 기본 대상은 내장 문항 세트다.")
 def verify(
-    profile: str = typer.Option(..., "--profile", help="프로파일 이름. 예: none, none-print"),
+    profile: str = typer.Option(..., "--profile", help="프로파일 이름. 예: none, a-decoy"),
     models: ModelGroup = typer.Option(
         ModelGroup.local,
         "--models",
@@ -59,27 +175,85 @@ def verify(
     local_model: str | None = typer.Option(
         None, "--local-model", help="Ollama 모델 이름. 없으면 설치된 첫 모델을 쓴다."
     ),
+    yes: bool = typer.Option(False, "--yes", help="클라우드 호출 전 확인 질문을 건너뛴다."),
+    allow_custom: Path | None = typer.Option(
+        None,
+        "--allow-custom",
+        help="내장 문항 세트 대신 이 PDF로 측정한다. 클라우드 모델과 함께 쓰면 파일 내용이 밖으로 나간다.",
+    ),
 ) -> None:
     try:
-        if models in (ModelGroup.cloud, ModelGroup.all):
-            raise ExamShieldError(
-                "클라우드 모델 검증은 아직 구현되지 않았다(Phase 3). --models local을 쓴다."
-            )
         loaded = load_profile(profile)
-        item_set = load_items()
+        clients: list[ModelClient] = []
+        skipped: list[Skipped] = []
+        cloud: list[ModelClient] = []
         if models is ModelGroup.mock:
-            clients: list[ModelClient] = [TextLayerModel(), MockModel(item_set.items)]
-            skipped: list[Skipped] = []
-        else:
+            clients = [TextLayerModel(), MockModel(load_items().items)]
+        if models in (ModelGroup.local, ModelGroup.all):
             clients, skipped = _local_models(local_model)
+        if models in (ModelGroup.cloud, ModelGroup.all):
+            cloud, cloud_skipped = _cloud_models()
+            skipped += cloud_skipped
+            if not cloud and models is ModelGroup.cloud:
+                reasons = "\n".join(f"  - {entry.reason}" for entry in cloud_skipped)
+                raise ExamShieldError(f"쓸 수 있는 클라우드 모델이 없다.\n{reasons}")
+        if allow_custom is not None:
+            if not allow_custom.is_file():
+                raise ExamShieldError(f"--allow-custom 파일을 찾지 못했다: {allow_custom}")
+            subject = custom_subject(allow_custom.read_bytes())
+        else:
+            subject = builtin_subject(load_items())
+        if cloud:
+            _confirm_cloud(loaded, subject, cloud, yes)
         report = run_verification(
-            loaded, item_set, clients, now=datetime.now().astimezone(), skipped=skipped
+            loaded,
+            subject,
+            clients + cloud,
+            now=datetime.now().astimezone(),
+            skipped=skipped,
+            transform=lambda pdf: protect_bytes(pdf, loaded),
         )
         path = write_report(report, out)
     except ExamShieldError as error:
         raise _fail(error) from error
     typer.echo(format_report(report))
     typer.echo(f"\n리포트: {path}")
+    if not any(row["errors"] < row["items"] for row in report["results"]):
+        typer.echo("오류: 측정된 값이 하나도 없다. 위의 건너뜀과 오류 수를 확인한다.", err=True)
+        raise typer.Exit(1)
+
+
+@auth_app.command("add", help="API 키를 물어서 OS 키체인에 저장한다. 키는 화면에 보이지 않는다.")
+def auth_add(provider: str = typer.Argument(..., help="openai, anthropic, google")) -> None:
+    try:
+        target = get_provider(provider)
+        value = typer.prompt(f"{target.company} API 키", hide_input=True)
+        store_key(target, value)
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    typer.echo(f"{target.company} 키를 OS 키체인에 저장했다.")
+
+
+@auth_app.command("list", help="제공사별로 키가 어디에 있는지와 끝 4자리를 보여준다.")
+def auth_list() -> None:
+    for target in PROVIDERS:
+        found = find_key(target)
+        state = f"{found.masked}  ({found.source})" if found else "없음"
+        typer.echo(f"{target.id:<10} {chosen_model(target):<20} {state}")
+
+
+@auth_app.command("remove", help="OS 키체인에서 키를 지운다. 환경변수는 건드리지 않는다.")
+def auth_remove(provider: str = typer.Argument(..., help="openai, anthropic, google")) -> None:
+    try:
+        target = get_provider(provider)
+        removed = delete_key(target)
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    typer.echo(
+        f"{target.company} 키를 OS 키체인에서 지웠다."
+        if removed
+        else f"OS 키체인에 {target.company} 키가 없다."
+    )
 
 
 @app.command(help="verify가 쓴 리포트 파일을 표로 보여준다.")
@@ -88,3 +262,109 @@ def report(report_file: Path = typer.Argument(..., help="리포트 JSON 파일")
         typer.echo(format_report(load_report(report_file)))
     except ExamShieldError as error:
         raise _fail(error) from error
+
+
+def _inputs(source: Path) -> list[Path]:
+    if source.is_dir():
+        found = sorted(
+            path
+            for path in source.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
+        )
+        if not found:
+            raise ExamShieldError(f"폴더에 PDF나 .docx 파일이 없다: {source}")
+        stems = [path.stem for path in found]
+        if len(set(stems)) != len(stems):
+            raise ExamShieldError("이름이 같은 PDF와 .docx가 함께 있다. 결과 파일 이름이 겹친다.")
+        return found
+    if source.is_file():
+        return [source]
+    raise ExamShieldError(f"입력을 찾지 못했다: {source}")
+
+
+@app.command(help="시험 문서의 복사본을 만들고, 원본과 내용이 같은지 바로 검사한다.")
+def protect(
+    source: Path = typer.Argument(..., metavar="입력", help="PDF 또는 .docx 파일, 또는 폴더"),
+    out: Path = typer.Option(..., "--out", help="복사본을 쓸 폴더. 원본이 있는 폴더는 안 된다."),
+    profile: str = typer.Option(..., "--profile", help="프로파일 이름. 예: a-glyph-remap"),
+    seed_file: Path | None = typer.Option(
+        None, "--seed-file", help="시드 파일. 같은 입력, 프로파일, 시드면 결과가 같다."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="출력 폴더에 같은 이름의 파일이 있어도 덮어쓴다."
+    ),
+) -> None:
+    failed = 0
+    try:
+        loaded = load_profile(profile)
+        sources = _inputs(source)
+        if out.exists() and not out.is_dir():
+            raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
+        # 대소문자나 유니코드 정규화만 다른 경로도 같은 폴더로 잡으려고 samefile로 비교한다.
+        if out.is_dir() and any(out.samefile(path.parent) for path in sources):
+            raise ExamShieldError("출력 폴더가 원본이 있는 폴더와 같다. 다른 폴더를 지정한다.")
+        if seed_file is not None and not seed_file.is_file():
+            raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
+        seed = seed_file.read_bytes() if seed_file is not None else None
+        targets = [out / f"{path.stem}.pdf" for path in sources]
+        existing = [str(path) for path in targets if path.exists() or job_path(path).exists()]
+        if existing and not force:
+            raise ExamShieldError(
+                "출력 폴더에 이미 같은 이름의 파일이 있다. 덮어쓰려면 --force를 준다: "
+                + ", ".join(existing)
+            )
+        engine = find_tesseract()
+        for path in sources:
+            original = read_document(path, out)
+            protected, result = protect_and_check(
+                original, loaded, seed, engine.read if engine else None
+            )
+            append_log(out, protected, result.passed, datetime.now().astimezone())
+            if not result.passed:
+                failed += 1
+                typer.echo(f"{path.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
+                typer.echo(format_result(result), err=True)
+                continue
+            written = write_outputs(protected, out, path.stem)
+            similarity = protected.record["text_layer_similarity"]
+            typer.echo(
+                f"{path.name} → {written}  검사 통과, "
+                f"추출 텍스트가 원문과 일치하는 정도 {similarity:.1%}"
+            )
+            for note in result.notes:
+                typer.echo(f"  참고: {note}")
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    except OSError as error:
+        raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    if failed:
+        raise typer.Exit(1)
+
+
+@app.command(help="원본과 복사본의 내용이 같은지 검사한다. 다르면 종료 코드 1.")
+def check(
+    original: Path = typer.Argument(..., metavar="원본", help="원본 PDF 또는 .docx"),
+    copy: Path = typer.Argument(..., metavar="복사본", help="protect가 만든 PDF"),
+    job: Path | None = typer.Option(
+        None, "--job", help="작업 기록(.job.json). 없으면 복사본 옆의 같은 이름 파일을 찾는다."
+    ),
+) -> None:
+    try:
+        for path in (original, copy):
+            if not path.is_file():
+                raise ExamShieldError(f"파일을 찾지 못했다: {path}")
+        copy_bytes = copy.read_bytes()
+        job_file = job if job is not None else job_path(copy)
+        if job is not None and not job.is_file():
+            raise ExamShieldError(f"작업 기록을 찾지 못했다: {job}")
+        expect = load_expectation(job_file, copy_bytes) if job_file.is_file() else Expectation()
+        original_bytes = read_document(original, copy.resolve().parent)
+        engine = find_tesseract()
+        result = compare(original_bytes, copy_bytes, expect, engine.read if engine else None)
+    except ExamShieldError as error:
+        raise _fail(error) from error
+    except OSError as error:
+        raise _fail(ExamShieldError(f"파일을 읽거나 쓰지 못했다: {error}")) from error
+    typer.echo(format_result(result))
+    if not result.passed:
+        raise typer.Exit(1)

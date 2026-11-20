@@ -2,11 +2,11 @@
 
 로컬에 있는 시험 문서(PDF, Word)를 내용은 그대로 둔 채 AI가 읽고 풀기 어렵게 재가공한 복사본으로 만들고, 그 효과를 날짜와 모델 버전이 찍힌 수치로 증명하는 오프라인 CLI.
 
-> **상태: 초기 개발 (Phase 1 완료).**
-> 측정 도구인 `examshield verify`와 `examshield report`가 동작한다. 지금은 변환 없는 대조군 점수만 잴 수 있다. 복사본을 만드는 `protect`는 아직 없다.
+> **상태: 초기 개발 (Phase 3 완료).**
+> 복사본을 만드는 `protect`, 내용이 같은지 검사하는 `check`, 효과를 재는 `verify`와 `report`가 동작한다. 클라우드 모델(OpenAI, Anthropic, Google) 연결도 들어 있지만 실제 키로 호출해 본 적은 없다. 실제 AI 모델로 잰 점수는 아직 없고, 지금 있는 수치는 텍스트 추출과 OCR 기준선뿐이다.
 > 무료 범위(Phase 1~5)를 순서대로 만드는 중이고, 유료 플랜은 계획중이다.
 
-**바로 가기:** [빠른 시작](#빠른-시작) · [**사용법**](USAGE.md) · [설치](#설치) · [로드맵](#로드맵) · [명세](spec/README.md)
+**바로 가기:** [빠른 시작](#빠른-시작) · [**사용법**](USAGE.md) · [설치](#설치) · [로드맵](#로드맵) · [명세](spec/README.md) · [English](README.en.md)
 
 ## 개요
 
@@ -30,15 +30,15 @@
 | 개발용 안전 훅과 비밀 파일 읽기 차단 ([안전 훅](#안전-훅)) | 완료 |
 | 명세 분할(`spec/`)과 원본 동일성 검사 | 완료 |
 | 내장 문항 세트 v1 (직접 쓴 더미 12문항, 기출문제 아님) | 완료 |
-| `examshield verify` — 내장 문항 세트로 프로파일을 측정하고 리포트를 쓴다 | 완료 (대조군 프로파일 `none`, `none-print`만) |
+| `examshield verify` — 내장 문항 세트로 프로파일을 측정하고 리포트를 쓴다 | 완료 (대조군과 시나리오 A 프로파일 4종) |
 | 촬영 시뮬레이션: 해상도, 기울기, 원근, 조명, 흐림, 노이즈, JPEG | 완료 (실제 촬영과 비교한 적 없음) |
 | 기준선: 텍스트 레이어 추출, Tesseract OCR | 완료 (Tesseract는 영어 데이터로만 실행해 봄) |
 | 로컬 모델(Ollama) 연결 | 완료 (가짜 서버로만 테스트, 실제 Ollama로는 실행해 보지 않음) |
 | `examshield report` — 리포트 파일을 표로 본다 | 완료 |
-| `examshield protect` — 시나리오 A(디지털 배포) 프로파일로 복사본 생성 | 예정 (Phase 2) |
-| `examshield check` — 원본과 복사본의 내용 동일성 검사 | 예정 (Phase 2) |
-| `examshield auth` — API 키를 OS 키체인에 보관 | 예정 (Phase 3) |
-| 클라우드 모델 검증 (본인 키 사용, 기본값 꺼짐) | 예정 (Phase 3) |
+| `examshield protect` — 시나리오 A(디지털 배포) 프로파일로 복사본 생성: 이미지화, 글리프 매핑 변조, 숨은 미끼 | 완료 (Word 입력은 LibreOffice 없이 흉내 낸 변환기로만 테스트) |
+| `examshield check` — 원본과 복사본의 내용 동일성 검사: 쪽수, 쪽 크기, 그림 개수, 텍스트, 렌더링, OCR | 완료 |
+| `examshield auth` — API 키를 OS 키체인에 보관 | 완료 (테스트용 키체인으로만 테스트, 실제 OS 키체인에는 써 보지 않음) |
+| 클라우드 모델 검증 (본인 키 사용, 기본값 꺼짐), 호출 전 확인, `--offline` | 완료 (각 사 SDK를 가짜 서버에 붙여서만 테스트, 실제 호출은 해 보지 않음) |
 | 수험번호별 추적 워터마크, `--copies`, `examshield trace` | 예정 (Phase 4) |
 | 모델 드리프트 경고, `examshield profile` | 예정 (Phase 5) |
 | 시나리오 B(인쇄 시험) 프로파일, 촬영 사진에서 워터마크 복원 | 계획중 (유료) |
@@ -82,25 +82,27 @@ uv tool install examshield
 [설치](#설치)를 마친 뒤, 저장소 폴더에서 실행한다.
 
 ```bash
-uv run examshield verify --profile none --models local        # 디지털 배포 경로의 대조군 점수
-uv run examshield verify --profile none-print --models local  # 인쇄·촬영 경로(시뮬레이션)의 대조군 점수
-uv run examshield report out/reports/<리포트파일>.json        # 저장된 리포트 다시 보기
+uv run examshield protect 시험지.pdf --out out/copies --profile a-remap-decoy  # 복사본을 만들고 바로 검사
+uv run examshield check 시험지.pdf out/copies/시험지.pdf                       # 내용이 같은지 다시 검사
+uv run examshield verify --profile a-remap-decoy --models local               # 이 프로파일의 효과 측정
 ```
 
-`--models local`은 텍스트 레이어 추출, Tesseract(설치돼 있으면), Ollama(떠 있으면)를 쓴다. 없는 것은 건너뛰고 리포트에 이유를 적는다.
+`protect`는 복사본(`시험지.pdf`)과 작업 기록(`시험지.job.json`)을 쓴다. 배포하는 것은 PDF뿐이다. 작업 기록에는 미끼가 가리키는 답이 들어 있으므로 함께 배포하지 않는다. `--models local`은 텍스트 레이어 추출, Tesseract(설치돼 있으면), Ollama(떠 있으면)를 쓴다. 없는 것은 건너뛰고 리포트에 이유를 적는다.
 
-출력 예 (2026-11-20, Tesseract 영어 데이터만 있고 Ollama는 없는 PC):
+`verify` 출력 예 (2026-11-20, 프로파일 `a-remap-decoy`, Tesseract 영어 데이터만 있고 Ollama는 없는 PC):
 
 ```
 모델           경로           구분    글자 판독률  정답률  미끼 적중률  오류
 text-layer     텍스트 레이어  대조군  100.0%       -       -            0
+text-layer     텍스트 레이어  변환본  21.5%        -       -            0
 tesseract-eng  이미지         대조군  40.4%        -       -            0
+tesseract-eng  이미지         변환본  40.4%        -       -            0
 건너뜀: ollama — Ollama(http://127.0.0.1:11434)에 연결하지 못했다. `ollama serve`가 떠 있는지 확인한다.
 ```
 
-Tesseract 수치가 낮은 것은 문항이 한국어인데 한국어 데이터가 없어서다. 교란 효과가 아니다.
+텍스트 레이어를 추출하면 원문의 21.5%만 맞는다. 쪽을 그림으로 읽는 경로(Tesseract)는 대조군과 변환본이 같다. 이 프로파일은 그림으로 읽는 AI를 막지 못한다는 뜻이다. Tesseract 수치 자체가 낮은 것은 문항이 한국어인데 한국어 데이터가 없어서다.
 
-복사본을 만드는 `protect`와 `check`는 Phase 2에서 생긴다.
+프로파일은 `none`, `a-rasterize`, `a-glyph-remap`, `a-decoy`, `a-remap-decoy`가 있다. 네 가지 `a-` 프로파일은 모두 `experimental`이다. 효과를 실제 AI로 확인하지 않았다.
 
 ## 사용법
 
@@ -109,7 +111,7 @@ Tesseract 수치가 낮은 것은 문항이 한국어인데 한국어 데이터�
 ### 이 저장소 개발하기
 
 ```bash
-uv sync
+uv sync --extra cloud    # 클라우드 SDK까지 설치해야 테스트가 전부 돈다
 uv run pytest            # 테스트
 uv run ruff check .      # 린트
 uv run mypy              # 타입 검사
@@ -125,13 +127,20 @@ git config core.hooksPath .githooks
 
 ## 알려진 한계
 
-- `verify`는 아직 대조군만 잰다. 교란 기법이 든 프로파일은 `protect`가 생기는 Phase 2부터 측정한다.
+- 시나리오 A 기법 세 가지는 화면에 보이는 것을 바꾸지 않는다. 화면을 캡처하거나 쪽을 그림으로 읽는 AI에는 효과가 없다. 측정에서도 이미지 경로의 OCR 판독률은 변환 전후가 같았다.
+- 글리프 매핑 변조는 PDF의 ToUnicode 표만 바꾼다. 글꼴 파일 안의 글자표를 직접 읽는 추출기는 원문을 복원할 수 있다. MuPDF와 poppler(`pdftotext`)로만 확인했다.
+- 숨은 미끼는 정답을 모르고 무작위로 고른 번호를 가리킨다. 우연히 정답을 가리킬 수 있다. 실제 AI가 미끼를 따르는지는 재지 않았다.
+- `check`의 렌더링 비교는 MuPDF 한 가지로 한다. 다른 PDF 뷰어에서 다르게 보이는 경우는 잡지 못한다. 이미지화한 복사본은 그 해상도(기본 200dpi)에서 원본과 같다는 뜻이고, 더 확대하면 원본보다 흐리다.
+- Word(.docx) 입력은 LibreOffice가 없는 PC에서 흉내 낸 변환기로만 테스트했다. LibreOffice가 같은 파일을 매번 같은 PDF로 바꾸는지, 변환 중 네트워크를 쓰지 않는지는 확인하지 못했다.
+- 클라우드 모델 연결은 실제 키로 호출해 본 적이 없다. 각 회사의 SDK가 보내는 요청을 같은 PC의 가짜 서버로 받아 확인했을 뿐이다. 가짜 서버의 응답 형식은 기억에 의존해 만들었으므로 실제 응답과 다를 수 있다.
+- 기본 모델 이름(`gpt-6.2-sol`, `claude-opus-5-5`, `gemini-3.8-flash`) 중 OpenAI와 Google 것은 설치된 SDK에 적힌 이름에서 고른 추측이다. 그 회사의 대표 모델인지 확인하지 못했다. 환경변수로 바꿀 수 있다.
+- 긴 문서는 `protect`가 느리다. 12쪽짜리 약관 PDF에 약 20초가 걸렸고 대부분 OCR 시간이다.
 - 실제 AI 모델로 잰 점수가 아직 없다. Ollama 연결은 응답 형식을 흉내 낸 가짜 서버로만 테스트했다. 실제 Ollama에서 응답 형식이나 비전 기능 판별이 다르면 고쳐야 한다.
 - 개발 PC의 Tesseract에 한국어 데이터가 없어서 한국어 OCR 기준선은 실제 값이 아니다.
 - 촬영 시뮬레이션은 실제 인쇄·촬영과 비교해 보정한 적이 없다.
 - 문항 세트 v1은 쉬운 상식 문항 12개다. 정답률의 통계적 의미는 작다.
 - `--models mock`의 `mock-reader`는 실제 AI가 아니다. 측정 파이프라인을 점검하는 용도다.
-- 명세의 0단계(타당성 실험)는 하지 않았다. 실제 AI 모델과 API 키가 필요하다. `verify`가 생기면 그 도구로 돌린다.
+- 명세의 0단계(타당성 실험)는 하지 않았다. 실제 AI 모델과 API 키가 필요하다. `verify`로 돌릴 수 있다.
 - 최신 멀티모달 AI에는 교란 폰트, 색 대비 왜곡, 방해선이 거의 효과가 없다는 연구가 있다. 어떤 기법도 통하지 않으면 방향을 "미끼 + 추적"으로 좁힌다 ([spec/12-risks.md](spec/12-risks.md)).
 - 안전 훅은 명령 문자열을 대조하는 안전망이다. 감싸거나 돌려 쓴 명령은 빠져나갈 수 있다.
 
@@ -161,10 +170,14 @@ git config core.hooksPath .githooks
 ```
 Gotcha/
 ├── examshield/
-│   ├── cli.py         # Typer 진입점: verify, report
+│   ├── cli.py         # Typer 진입점: protect, check, verify, report, auth
+│   ├── protect/       # pipeline, techniques/(rasterize, glyph_remap, decoy)
+│   ├── check/         # compare: 구조, 텍스트, 렌더링, OCR 비교
 │   ├── benchmark/     # 문항 세트 (v1)와 PDF 렌더링
-│   ├── profiles/      # 프로파일 YAML: none, none-print
+│   ├── profiles/      # 프로파일 YAML: none, none-print, a-*
 │   ├── verify/        # runner, capture_sim, metrics, report, models/
+│   ├── auth/          # keys: 환경변수와 OS 키체인에서 API 키 찾기
+│   ├── providers.py   # 클라우드 제공사 목록: 키 이름, 기본 모델, 접속 주소
 │   ├── netguard.py    # 오프라인 설정일 때 네트워크 거부
 │   └── pdfio.py       # PDF 읽기, 렌더링, 결정적 저장
 ├── tests/
@@ -188,8 +201,8 @@ Phase 하나를 끝낼 때마다 결과를 확인받고 다음으로 넘어간�
 
 - [x] **Phase 0** — 프로젝트 골격: 명세 분할, 훅과 거부 규칙, 린트·타입 검사·푸시 전 검사, 문서 초안
 - [x] **Phase 1** — `verify`: 문항 세트, 촬영 시뮬레이션, 기준선(텍스트 추출, Tesseract), 로컬 모델, 리포트. 완료 기준: 변환 없는 대조군 점수가 나온다
-- [ ] **Phase 2** — `protect` + `check`, 시나리오 A 프로파일(이미지화, 글리프 매핑 변조, 숨은 미끼). 완료 기준: 결정적 출력, 네트워크 0건 테스트 통과
-- [ ] **Phase 3** — `auth`, 클라우드 모델 검증, `--offline`. 완료 기준: 키 없이 실행하면 안내 후 종료, 호출 전 확인 절차 동작
+- [x] **Phase 2** — `protect` + `check`, 시나리오 A 프로파일(이미지화, 글리프 매핑 변조, 숨은 미끼). 완료 기준: 결정적 출력, 네트워크 0건 테스트 통과
+- [x] **Phase 3** — `auth`, 클라우드 모델 검증, `--offline`. 완료 기준: 키 없이 실행하면 안내 후 종료, 호출 전 확인 절차 동작
 - [ ] **Phase 4** — 추적 워터마크, `--copies`, `trace`. 완료 기준: PDF와 화면 캡처 수준 이미지에서 수험번호 복원
 - [ ] **Phase 5** — 모델 드리프트 경고, `report`, `profile`, 문서 마무리. 완료 기준: 전체 테스트 통과
 - [ ] **Phase 6** — 시나리오 B 인쇄용 프로파일, 실제 인쇄·촬영 보정, 촬영 사진에서 워터마크 복원 (계획중, 유료)

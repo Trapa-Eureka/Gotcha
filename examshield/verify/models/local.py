@@ -6,8 +6,8 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlsplit
 
-from examshield.errors import ModelUnavailableError
-from examshield.netguard import require_network
+from examshield.errors import ModelUnavailableError, NetworkRefusedError
+from examshield.netguard import OFFLINE_ENV, offline_enabled, require_network
 from examshield.verify.metrics import parse_answer, strip_answer_line
 from examshield.verify.models.base import IMAGE, PROMPT, TEXT, ModelInfo, ModelReply, PageInput
 
@@ -20,6 +20,13 @@ TIMEOUT_SECONDS = 300
 def ollama_base_url() -> str:
     host = os.environ.get(HOST_ENV, "").strip() or DEFAULT_HOST
     return host if "://" in host else f"http://{host}"
+
+
+def is_relayed(name: str, described: dict[str, Any]) -> bool:
+    """Ollama가 이 PC에서 돌리지 않고 외부 서버로 넘기는 모델인지 본다."""
+    if described.get("remote_host") or described.get("remote_model"):
+        return True
+    return name.endswith(("-cloud", ":cloud"))
 
 
 class OllamaModel:
@@ -38,17 +45,32 @@ class OllamaModel:
                 f"Ollama에 모델 '{wanted}'이(가) 없다. 설치된 모델: {names}"
             )
         self._model = wanted
-        capabilities = self._call("POST", "/api/show", {"model": wanted}).get("capabilities") or []
-        sees = "vision" in capabilities
+        shown = self._call("POST", "/api/show", {"model": wanted})
+        relayed = is_relayed(wanted, entry) or is_relayed(wanted, shown)
+        if relayed and offline_enabled():
+            raise NetworkRefusedError(
+                f"오프라인 설정({OFFLINE_ENV})이 켜져 있어 Ollama 모델 '{wanted}'을(를) 거부했다. "
+                "이 모델은 이 PC에서 돌지 않고 Ollama가 외부 서버로 중계한다."
+            )
+        sees = "vision" in (shown.get("capabilities") or [])
         digest = str(entry.get("digest", ""))[:12] or "unknown"
         self.info = ModelInfo(
             provider="ollama",
             name=wanted,
             version=digest,
-            kind="local",
+            kind="relayed" if relayed else "local",
             channels=(TEXT, IMAGE) if sees else (TEXT,),
             solves=True,
-            note="" if sees else "비전 기능이 없는 모델이라 이미지 경로는 측정하지 않았다.",
+            note=" ".join(
+                part
+                for part in (
+                    "" if sees else "비전 기능이 없는 모델이라 이미지 경로는 측정하지 않았다.",
+                    "Ollama가 외부 서버로 중계하는 모델이다. 입력이 이 PC 밖으로 나간다."
+                    if relayed
+                    else "",
+                )
+                if part
+            ),
         )
 
     def run(self, page: PageInput, channel: str) -> ModelReply:

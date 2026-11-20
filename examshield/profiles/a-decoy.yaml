@@ -1,0 +1,6 @@
+name: a-decoy
+scenario: A
+status: experimental
+description: 쪽마다 보이지 않는 미끼 지시문을 넣는다. 파일을 그대로 넣은 AI가 미끼가 가리키는 답을 내도록 유도한다.
+techniques:
+  - id: decoy
