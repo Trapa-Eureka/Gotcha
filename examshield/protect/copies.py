@@ -60,18 +60,23 @@ def read_examinee_ids(path: Path) -> list[str]:
         text = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeDecodeError) as error:
         raise ExamShieldError(f"수험번호 목록을 읽지 못했다: {path}") from error
+    return parse_examinee_ids(text, path.name)
+
+
+def parse_examinee_ids(text: str, source: str) -> list[str]:
+    """수험번호 목록의 글에서 첫 열을 읽는다. source는 오류 문구에 쓰는 이름이다."""
     ids: list[str] = []
-    for number, row in enumerate(csv.reader(io.StringIO(text)), start=1):
+    for number, row in enumerate(csv.reader(io.StringIO(text.lstrip("\ufeff"))), start=1):
         value = row[0].strip() if row else ""
         if not value or (number == 1 and value.lower() in HEADER_WORDS):
             continue
         if not _ID.fullmatch(value):
             raise ExamShieldError(
-                f"{path.name} {number}번째 줄: 수험번호는 영문, 숫자, '-', '_'만 64자까지 쓸 수 있다."
+                f"{source} {number}번째 줄: 수험번호는 영문, 숫자, '-', '_'만 64자까지 쓸 수 있다."
             )
         ids.append(value)
     if not ids:
-        raise ExamShieldError(f"수험번호 목록이 비어 있다: {path}")
+        raise ExamShieldError(f"수험번호 목록이 비어 있다: {source}")
     # 대소문자만 다른 번호도 겹친 것으로 본다. 파일 이름이 겹쳐 한쪽 복사본이 사라진다.
     folded = [value.casefold() for value in ids]
     repeated = sorted({value for value in ids if folded.count(value.casefold()) > 1})

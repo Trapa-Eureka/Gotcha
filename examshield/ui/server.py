@@ -2,6 +2,10 @@
 
 127.0.0.1에만 붙고, 시작할 때 만든 토큰이 있어야 쓸 수 있다. 올린 파일은 이 프로세스의 메모리에서
 처리해 결과를 브라우저로 돌려준다. 디스크에는 Word·한글 변환용 임시 파일만 잠깐 쓴다.
+
+수험번호별 복사본과 추적은 다르다. 시드 파일과 매핑표는 브라우저를 거치지 않는다. 화면에는 경로만
+적고, 서버가 이 PC의 그 파일을 직접 읽고 쓴다. 복사본도 내려받기 대신 출력 폴더에 쓴다. 경로는
+웹 화면을 띄운 폴더 안으로만 받는다.
 """
 
 import base64
@@ -31,13 +35,17 @@ from examshield.convert import (
 from examshield.errors import ExamShieldError
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
+from examshield.protect.batch import CopiesFailed, make_copies
+from examshield.protect.copies import keyed_technique, parse_examinee_ids, read_map
 from examshield.protect.pipeline import KEYED, expectation_from_text, protect_and_check
+from examshield.trace.detect import MAX_LEAKED_FILES, format_trace, trace_many
 from examshield.verify.drift import DEFAULT_REPORT_DIR, RECORD_DIR, Current, assess, find_latest
 
 HOST = "127.0.0.1"
 PAGE = Path(__file__).resolve().parent / "page.html"
 TOKEN_HEADER = "X-Examshield-Token"
 MAX_BODY_BYTES = 100 * 1024 * 1024
+MAX_IDS_CHARS = 200_000
 # 아무것도 보내지 않는 연결이 자리를 잡고 있지 못하게 한다.
 IDLE_TIMEOUT_SECONDS = 30
 SECURITY_HEADERS = {
@@ -65,11 +73,19 @@ class Service:
     """화면이 부르는 기능. HTTP와 떨어져 있어 따로 테스트할 수 있다."""
 
     def __init__(
-        self, work_dir: Path, reports: Path | None = None, records: Path | None = None
+        self,
+        work_dir: Path,
+        reports: Path | None = None,
+        records: Path | None = None,
+        base_dir: Path | None = None,
     ) -> None:
         self.work_dir = work_dir
         self.reports = reports or DEFAULT_REPORT_DIR
         self.records = records or RECORD_DIR
+        # 화면에 적은 경로는 이 폴더 안으로만 받는다.
+        self.base_dir = (base_dir or Path.cwd()).resolve()
+        # 오래 걸리는 일의 진행. 화면이 따로 물어 본다.
+        self.progress: dict[str, Any] = {"label": "", "done": 0, "total": 0}
         # 문서 처리는 한 번에 하나만 한다. 연결은 여러 개를 받아도 메모리와 CPU는 하나 몫만 쓴다.
         self.busy = threading.Lock()
 
@@ -130,8 +146,8 @@ class Service:
         profile = load_profile(profile_name)
         if any(entry.id == "watermark" for entry in profile.techniques):
             raise ExamShieldError(
-                f"프로파일 '{profile.name}'은 수험번호별 복사본용이다. 명령줄에서 "
-                "`examshield protect --copies`로 쓴다."
+                f"프로파일 '{profile.name}'은 수험번호별 복사본용이다. 아래의 "
+                "'수험번호별 복사본'에서 만든다."
             )
         original, label = self._document(name, data)
         engine = find_tesseract()
@@ -164,6 +180,102 @@ class Service:
         engine = find_tesseract()
         result = compare(document, copy, expect, engine.read if engine else None)
         return {"passed": result.passed, "summary": format_result(result)}
+
+    def local_path(self, text: str, label: str) -> Path:
+        """화면에 적은 경로를 이 PC의 경로로 바꾼다. 웹 화면을 띄운 폴더 밖은 받지 않는다."""
+        if not text.strip() or "\x00" in text:
+            raise ExamShieldError(f"{label} 경로가 비어 있다.")
+        given = Path(text.strip())
+        if given.is_absolute() or given.drive:
+            raise ExamShieldError(
+                f"{label} 경로는 웹 화면을 띄운 폴더({self.base_dir}) 기준으로 적는다. "
+                "절대 경로는 받지 않는다."
+            )
+        resolved = (self.base_dir / given).resolve()
+        if resolved == self.base_dir or not resolved.is_relative_to(self.base_dir):
+            raise ExamShieldError(f"{label} 경로가 웹 화면을 띄운 폴더 밖이다: {text}")
+        return resolved
+
+    def copies(
+        self,
+        name: str,
+        data: bytes,
+        profile_name: str,
+        ids_text: str,
+        seed_path: str,
+        map_path: str,
+        out_dir: str,
+        resume: bool,
+    ) -> dict[str, Any]:
+        profile = load_profile(profile_name)
+        keyed_technique(profile)
+        ids = parse_examinee_ids(ids_text, "수험번호 목록")
+        seed_file = self.local_path(seed_path, "시드 파일")
+        table = self.local_path(map_path, "매핑표")
+        out = self.local_path(out_dir, "출력 폴더")
+        stem = safe_name(Path(name).stem) or "document"
+        engine = find_tesseract()
+        label = Path(name)
+
+        def started(kept: int, total: int) -> None:
+            self.progress = {"label": "복사본", "done": kept, "total": total}
+
+        def stepped() -> None:
+            self.progress = {**self.progress, "done": self.progress["done"] + 1}
+
+        try:
+            batch = make_copies(
+                stem=stem,
+                load=lambda: self._document(name, data)[0],
+                out=out,
+                profile=profile,
+                seed_file=seed_file,
+                ids=ids,
+                table=table,
+                resume=resume,
+                ocr=engine.read if engine else None,
+                on_start=started,
+                on_step=stepped,
+            )
+        except CopiesFailed as error:
+            return {"passed": False, "summary": f"{error}\n{error.detail}", "notes": []}
+        finally:
+            self.progress = {"label": "", "done": 0, "total": 0}
+        _label, warnings = self._warnings(profile)
+        notes = [HWP_NOTICE] if needs_review(label) else []
+        lines = [
+            f"복사본 {len(batch.rows)}개, 모두 검사 통과",
+            f"이번에 만든 것 {batch.made}개, 그대로 둔 것 {batch.kept}개",
+            f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개)",
+            f"출력 폴더: {out.relative_to(self.base_dir)}",
+            f"매핑표: {table.relative_to(self.base_dir)}",
+            "매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.",
+        ]
+        return {"passed": True, "summary": "\n".join(lines), "warnings": warnings, "notes": notes}
+
+    def trace(
+        self,
+        name: str,
+        original: bytes,
+        leaked: list[tuple[str, bytes]],
+        seed_path: str,
+        map_path: str,
+    ) -> dict[str, Any]:
+        seed_file = self.local_path(seed_path, "시드 파일")
+        table = self.local_path(map_path, "매핑표")
+        for label, path in (("시드 파일", seed_file), ("매핑표", table)):
+            if not path.is_file():
+                raise ExamShieldError(f"{label}을 찾지 못했다: {path.relative_to(self.base_dir)}")
+        if not 1 <= len(leaked) <= MAX_LEAKED_FILES:
+            raise ExamShieldError(f"유출본은 1개에서 {MAX_LEAKED_FILES}개까지 받는다.")
+        document, _label = self._document(name, original)
+        result = trace_many(
+            [(safe_name(entry) or "유출본", data, Path(entry).suffix) for entry, data in leaked],
+            document,
+            read_map(table),
+            seed_file.read_bytes(),
+        )
+        return {"found": result.found, "summary": format_trace(result)}
 
 
 def safe_name(text: str) -> str:
@@ -240,8 +352,15 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
                     self._send(HTTPStatus.OK, page.encode("utf-8"), "text/html; charset=utf-8")
                 elif url.path == "/api/profiles":
                     self._json(
-                        HTTPStatus.OK, {"profiles": service.profiles(), "version": __version__}
+                        HTTPStatus.OK,
+                        {
+                            "profiles": service.profiles(),
+                            "version": __version__,
+                            "base_dir": str(service.base_dir),
+                        },
                     )
+                elif url.path == "/api/progress":
+                    self._json(HTTPStatus.OK, dict(service.progress))
                 else:
                     raise Refused(HTTPStatus.NOT_FOUND, "없는 주소다.")
             except Refused as error:
@@ -281,7 +400,7 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
             try:
                 self._guard()
                 path = urlsplit(self.path).path
-                if path not in ("/api/protect", "/api/check"):
+                if path not in ("/api/protect", "/api/check", "/api/copies", "/api/trace"):
                     raise Refused(HTTPStatus.NOT_FOUND, "없는 주소다.")
                 payload = self._body()
                 name = _text(payload.get("name"), "파일 이름")
@@ -290,6 +409,43 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
                     profile = _text(payload.get("profile"), "프로파일")
                     with service.busy:
                         answer = service.protect(name, document, profile)
+                elif path == "/api/copies":
+                    ids_text = payload.get("ids")
+                    if not isinstance(ids_text, str) or len(ids_text) > MAX_IDS_CHARS:
+                        raise Refused(HTTPStatus.BAD_REQUEST, "수험번호 목록이 없거나 너무 길다.")
+                    with service.busy:
+                        answer = service.copies(
+                            name,
+                            document,
+                            _text(payload.get("profile"), "프로파일"),
+                            ids_text,
+                            _text(payload.get("seed_path"), "시드 파일 경로"),
+                            _text(payload.get("map_path"), "매핑표 경로"),
+                            _text(payload.get("out_dir"), "출력 폴더"),
+                            payload.get("resume") is True,
+                        )
+                elif path == "/api/trace":
+                    listed = payload.get("leaked")
+                    if not isinstance(listed, list) or not listed:
+                        raise Refused(HTTPStatus.BAD_REQUEST, "유출본이 없다.")
+                    leaked = []
+                    for entry in listed:
+                        if not isinstance(entry, dict):
+                            raise Refused(HTTPStatus.BAD_REQUEST, "유출본을 읽지 못했다.")
+                        leaked.append(
+                            (
+                                _text(entry.get("name"), "유출본 이름"),
+                                _decode(entry.get("file"), "유출본"),
+                            )
+                        )
+                    with service.busy:
+                        answer = service.trace(
+                            name,
+                            document,
+                            leaked,
+                            _text(payload.get("seed_path"), "시드 파일 경로"),
+                            _text(payload.get("map_path"), "매핑표 경로"),
+                        )
                 else:
                     job = payload.get("job")
                     if job is not None and not isinstance(job, str):
@@ -311,12 +467,16 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
 
 
 def make_server(
-    work_dir: Path, port: int = 0, reports: Path | None = None, records: Path | None = None
+    work_dir: Path,
+    port: int = 0,
+    reports: Path | None = None,
+    records: Path | None = None,
+    base_dir: Path | None = None,
 ) -> tuple[ThreadingHTTPServer, str]:
     """서버와 화면 주소를 돌려준다. port가 0이면 빈 포트를 고른다."""
     token = secrets.token_urlsafe(24)
     server = ThreadingHTTPServer(
-        (HOST, port), make_handler(Service(work_dir, reports, records), token)
+        (HOST, port), make_handler(Service(work_dir, reports, records, base_dir), token)
     )
     server.daemon_threads = True
     return server, f"http://{HOST}:{server.server_port}/?t={token}"

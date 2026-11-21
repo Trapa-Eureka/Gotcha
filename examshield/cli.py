@@ -1,4 +1,3 @@
-import glob
 import importlib
 import os
 import sys
@@ -21,17 +20,12 @@ from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
 from examshield.progress import Progress
+from examshield.protect.batch import CopiesFailed, inside, make_copies
 from examshield.protect.copies import (
-    append_map,
     check_seed,
-    choose_jobs,
     keyed_technique,
-    map_row,
-    protect_copies,
     read_examinee_ids,
     read_map,
-    reusable_rows,
-    write_map,
 )
 from examshield.protect.pipeline import (
     AnswerKey,
@@ -628,7 +622,7 @@ def protect(
             if len(sources) != 1:
                 raise ExamShieldError("--answer-key는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
             # S5와 같은 이유다. 정답표가 배포하는 폴더에 섞여 나가면 안 된다.
-            if _inside(answer_key, out):
+            if inside(answer_key, out):
                 raise ExamShieldError(f"정답표를 출력 폴더 안에 둘 수 없다: {answer_key}")
             answers = read_answer_key(answer_key)
         if copies is not None:
@@ -707,19 +701,6 @@ def _warn_drift(profile: Profile) -> None:
         typer.echo(f"경고: {warning}", err=True)
 
 
-def _inside(path: Path, folder: Path) -> bool:
-    """path가 folder 안(또는 folder 자체)인지 본다. 대소문자나 유니코드 표기만 다른 경로도 잡는다."""
-    resolved = path.resolve()
-    for candidate in (resolved, *resolved.parents):
-        if folder.exists() and candidate.exists() and candidate.samefile(folder):
-            return True
-    wanted = unicodedata.normalize("NFC", str(folder.resolve())).casefold()
-    return any(
-        unicodedata.normalize("NFC", str(candidate)).casefold() == wanted
-        for candidate in (resolved, *resolved.parents)
-    )
-
-
 def _protect_copies(
     sources: list[Path],
     out: Path,
@@ -738,91 +719,57 @@ def _protect_copies(
     keyed_technique(profile)
     if seed_file is not None and not seed_file.is_file():
         raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
-    seed = check_seed(seed_file.read_bytes() if seed_file is not None else None)
+    check_seed(seed_file.read_bytes() if seed_file is not None else None)
     ids = read_examinee_ids(copies)
-    choose_jobs(jobs, len(ids))
     if out.exists() and not out.is_dir():
         raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
     if out.is_dir() and out.samefile(source.parent):
         raise ExamShieldError("출력 폴더가 원본이 있는 폴더와 같다. 다른 폴더를 지정한다.")
     table = map_file or Path("secrets") / f"{source.stem}.watermark-map.csv"
-    # S5: 매핑표와 시드는 배포하는 폴더에 두지 않는다.
-    for label, path in (("매핑표", table), ("시드 파일", seed_file), ("수험번호 목록", copies)):
-        if path is not None and _inside(path, out):
-            raise ExamShieldError(
-                f"{label}를 출력 폴더 안에 둘 수 없다. 출력 폴더는 배포하는 곳이다: {path}"
-            )
-    targets = [out / f"{source.stem}-{examinee}.pdf" for examinee in ids]
-    existing = [str(path) for path in targets if path.exists() or job_path(path).exists()]
-    if table.exists():
-        existing.append(str(table))
-    if existing and not force and not resume:
-        shown = ", ".join(existing[:5]) + (" 외" if len(existing) > 5 else "")
-        raise ExamShieldError(
-            "이미 같은 이름의 파일이 있다. 끊긴 실행을 이어 하려면 --resume을, "
-            f"처음부터 덮어쓰려면 --force를 준다: {shown}"
-        )
-    # 이번 목록에 없는 예전 복사본이 남으면 매핑표와 폴더가 어긋난다. 지우지는 않고 멈춘다.
-    wanted = {path.name for path in targets}
-    stale = sorted(
-        path.name
-        for path in (out.glob(f"{glob.escape(source.stem)}-*.pdf") if out.is_dir() else [])
-        if path.name not in wanted
-    )
-    if stale:
-        raise ExamShieldError(
-            "출력 폴더에 이번 수험번호 목록에 없는 복사본이 있다. 치우거나 새 폴더를 쓴다: "
-            + ", ".join(stale[:5])
-        )
     engine = find_tesseract()
-    original = read_document(source, out)
-    kept = (
-        reusable_rows(table, out, source.stem, ids, seed, original, profile, answers is not None)
-        if resume
-        else {}
-    )
-    # 매핑표를 쓸 수 있는지 복사본을 만들기 전에 확인한다. 복사본만 남고 매핑표가 없으면 추적할 수 없다.
-    # 만드는 동안에도 복사본마다 한 줄씩 보탠다. 끊겨도 그때까지 만든 것은 추적하고 이어 할 수 있다.
-    write_map(table, list(kept.values()))
-    todo = [examinee for examinee in ids if examinee not in kept]
-    if resume:
-        typer.echo(
-            f"이어 하기: 이미 만든 복사본 {len(kept)}개는 그대로 두고 {len(todo)}개를 만든다."
+    shown: list[Progress] = []
+
+    def started(kept: int, total: int) -> None:
+        if resume:
+            typer.echo(
+                f"이어 하기: 이미 만든 복사본 {kept}개는 그대로 두고 {total - kept}개를 만든다."
+            )
+        shown.append(Progress(total, "복사본", already=kept))
+
+    try:
+        batch = make_copies(
+            stem=source.stem,
+            load=lambda: read_document(source, out),
+            out=out,
+            profile=profile,
+            seed_file=seed_file,
+            ids=ids,
+            table=table,
+            answers=answers,
+            jobs=jobs,
+            resume=resume,
+            force=force,
+            ocr=engine.read if engine else None,
+            keep_out=(("수험번호 목록", copies),),
+            on_start=started,
+            on_step=lambda: shown[0].step(),
         )
-    made_rows = dict(kept)
-    if todo:
-        base_check, made = protect_copies(
-            original, profile, seed, todo, engine.read if engine else None, answers, jobs
-        )
-        if not base_check.passed:
-            typer.echo(f"{source.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
-            typer.echo(format_result(base_check), err=True)
-            raise typer.Exit(1)
-        progress = Progress(len(ids), "복사본", already=len(kept))
-        try:
-            for copy in made:
-                append_log(out, copy.protected, copy.check.passed, datetime.now().astimezone())
-                if not copy.check.passed:
-                    progress.close()
-                    typer.echo(f"{copy.examinee_id}: 워터마크 검사 실패. 중단한다.", err=True)
-                    typer.echo(format_result(copy.check), err=True)
-                    raise typer.Exit(1)
-                written = write_outputs(copy.protected, out, f"{source.stem}-{copy.examinee_id}")
-                row = map_row(copy, seed, written.name)
-                append_map(table, row)
-                made_rows[copy.examinee_id] = row
-                progress.step()
-        finally:
+    except CopiesFailed as error:
+        for progress in shown:
             progress.close()
-    rows = [made_rows[examinee] for examinee in ids]
-    write_map(table, rows)
-    typer.echo(f"{source.name} → {out}  복사본 {len(rows)}개, 모두 검사 통과")
+        typer.echo(f"{source.name}: {error}", err=True)
+        typer.echo(error.detail, err=True)
+        raise typer.Exit(1) from error
+    finally:
+        for progress in shown:
+            progress.close()
+    typer.echo(f"{source.name} → {out}  복사본 {len(batch.rows)}개, 모두 검사 통과")
     if needs_review(source):
         typer.echo(f"주의: {HWP_NOTICE}")
     typer.echo(
         f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개). 목록의 제목 줄이 번호로 읽히지 않았는지 확인한다."
     )
-    typer.echo(f"매핑표: {table}")
+    typer.echo(f"매핑표: {batch.table}")
     typer.echo("매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.")
 
 
@@ -989,13 +936,14 @@ def ui(
     ),
 ) -> None:
     try:
-        server, address = make_server(work_dir, port)
+        server, address = make_server(work_dir, port, base_dir=Path.cwd())
     except OSError as error:
         raise _fail(ExamShieldError(f"웹 화면을 띄우지 못했다: {error}")) from error
     typer.echo(f"웹 화면: {address}")
     typer.echo(
         "이 PC에서만 열린다(127.0.0.1). 주소에 든 토큰이 있어야 쓸 수 있다. 끝내려면 Ctrl+C."
     )
+    typer.echo(f"수험번호별 복사본과 추적에서 적는 경로는 이 폴더 기준이다: {Path.cwd()}")
     if not no_browser:
         webbrowser.open(address)
     try:

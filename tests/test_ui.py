@@ -194,12 +194,15 @@ def test_bad_requests_get_a_plain_message(
     assert message in answer["error"]
 
 
-def test_watermark_profiles_are_sent_to_the_command_line(client: Client, sample_pdf: bytes) -> None:
+def test_watermark_profiles_are_sent_to_the_copies_section(
+    client: Client, sample_pdf: bytes
+) -> None:
     status, answer = client.post(
-        "/api/protect", {"name": "a.pdf", "file": b64(sample_pdf), "profile": "a-full"}
+        "/api/protect",
+        {"name": "exam.pdf", "file": base64.b64encode(sample_pdf).decode(), "profile": "a-full"},
     )
 
-    assert status == 400 and "--copies" in answer["error"]
+    assert status == 400 and "수험번호별 복사본" in answer["error"]
 
 
 def test_requests_from_elsewhere_are_refused(client: Client) -> None:
@@ -265,7 +268,7 @@ def test_download_names_cannot_carry_paths_or_markup() -> None:
 
 
 def test_ui_command_reports_a_port_it_cannot_use(monkeypatch: pytest.MonkeyPatch) -> None:
-    def refuse(*_: object) -> None:
+    def refuse(*_: object, **__: object) -> None:
         raise OSError("address already in use")
 
     monkeypatch.setattr("examshield.cli.make_server", refuse)
@@ -351,3 +354,173 @@ def test_the_page_drops_the_token_from_the_address_bar() -> None:
     page = (Path(__file__).resolve().parent.parent / "examshield/ui/page.html").read_text("utf-8")
 
     assert 'history.replaceState(null, "", "/")' in page
+
+
+@pytest.fixture
+def desk(tmp_path: Path) -> Iterator[tuple[Client, Path]]:
+    """웹 화면을 띄운 폴더가 정해진 서버. 시드 파일이 secrets/에 있다."""
+    base = tmp_path / "desk"
+    (base / "secrets").mkdir(parents=True)
+    (base / "secrets" / "exam.seed").write_bytes(b"0123456789abcdef-institution-seed")
+    server, address = make_server(
+        tmp_path / "work",
+        reports=tmp_path / "reports",
+        records=tmp_path / "records",
+        base_dir=base,
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield Client(address), base
+    server.shutdown()
+    server.server_close()
+
+
+def copies_request(pdf: bytes, **changed: Any) -> dict[str, Any]:
+    return {
+        "name": "exam.pdf",
+        "file": base64.b64encode(pdf).decode(),
+        "profile": "a-full",
+        "ids": "수험번호\nA1\nA2\nA3\n",
+        "seed_path": "secrets/exam.seed",
+        "map_path": "secrets/exam.map.csv",
+        "out_dir": "out/copies",
+        **changed,
+    }
+
+
+def test_copies_are_written_to_the_folder_and_a_capture_is_traced(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
+    client, base = desk
+
+    status, made = client.post("/api/copies", copies_request(sample_pdf))
+    written = sorted(path.name for path in (base / "out" / "copies").glob("*.pdf"))
+    table = (base / "secrets" / "exam.map.csv").read_text(encoding="utf-8")
+
+    assert status == 200 and made["passed"], made
+    assert written == ["exam-A1.pdf", "exam-A2.pdf", "exam-A3.pdf"]
+    assert "A2" in table and "복사본 3개" in made["summary"]
+    # 복사본도, 시드도, 매핑표의 내용도 브라우저로 돌아가지 않는다.
+    sent_back = json.dumps(made)
+    assert "pdf" not in made and "0123456789abcdef" not in sent_back
+    assert table.splitlines()[1].split(",")[1] not in sent_back
+
+    copy = open_pdf_bytes((base / "out" / "copies" / "exam-A2.pdf").read_bytes())
+    pixmap = copy[1].get_pixmap(dpi=130, colorspace=pymupdf.csGRAY)
+    shot = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.stride)
+    capture = encode_png(np.ascontiguousarray(shot[:, : pixmap.width]))
+    trace_request = {
+        "name": "exam.pdf",
+        "file": base64.b64encode(sample_pdf).decode(),
+        "leaked": [{"name": "capture.png", "file": base64.b64encode(capture).decode()}],
+        "seed_path": "secrets/exam.seed",
+        "map_path": "secrets/exam.map.csv",
+    }
+    status, traced = client.post("/api/trace", trace_request)
+
+    assert status == 200 and traced["found"], traced
+    assert "A2" in traced["summary"]
+
+    again = client.post("/api/copies", copies_request(sample_pdf))
+    resumed = client.post("/api/copies", copies_request(sample_pdf, resume=True))
+    assert again[0] == 400 and "이미 같은 이름" in again[1]["error"]
+    assert resumed[0] == 200 and "그대로 둔 것 3개" in resumed[1]["summary"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("seed_path", "/etc/passwd"),
+        ("seed_path", "../outside.seed"),
+        ("map_path", "../../map.csv"),
+        ("out_dir", ".."),
+        ("out_dir", "."),
+        ("out_dir", "out/../../elsewhere"),
+        ("map_path", "out/copies/map.csv"),
+        ("seed_path", "secrets/none.seed"),
+        ("seed_path", ""),
+    ],
+)
+def test_paths_outside_the_folder_or_inside_the_output_are_refused(
+    desk: tuple[Client, Path], sample_pdf: bytes, tmp_path: Path, field: str, value: str
+) -> None:
+    client, base = desk
+    (tmp_path / "outside.seed").write_bytes(b"x" * 32)
+
+    status, answer = client.post("/api/copies", copies_request(sample_pdf, **{field: value}))
+
+    assert status == 400 and "error" in answer
+    assert not (base / "out").exists() and not (tmp_path / "elsewhere").exists()
+    assert not list(tmp_path.glob("*.csv"))
+
+
+def test_a_link_out_of_the_folder_is_not_followed(
+    desk: tuple[Client, Path], sample_pdf: bytes, tmp_path: Path
+) -> None:
+    client, base = desk
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (base / "link").symlink_to(outside, target_is_directory=True)
+
+    status, answer = client.post("/api/copies", copies_request(sample_pdf, out_dir="link/copies"))
+
+    assert status == 400 and "밖" in answer["error"]
+    assert list(outside.iterdir()) == []
+
+
+def test_copies_need_a_per_examinee_profile_and_a_clean_list(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
+    client, _ = desk
+
+    plain = client.post("/api/copies", copies_request(sample_pdf, profile="a-remap-decoy"))
+    bad_id = client.post("/api/copies", copies_request(sample_pdf, ids="A1\n../A2\n"))
+    twice = client.post("/api/copies", copies_request(sample_pdf, ids="A1\na1\n"))
+    none = client.post("/api/copies", copies_request(sample_pdf, ids="\n\n"))
+
+    assert [status for status, _ in (plain, bad_id, twice, none)] == [400, 400, 400, 400]
+    assert "수험번호" in bad_id[1]["error"] and "겹친다" in twice[1]["error"]
+
+
+def test_trace_refuses_missing_tables_and_too_many_or_no_files(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
+    client, _ = desk
+    base_request = {
+        "name": "exam.pdf",
+        "file": base64.b64encode(sample_pdf).decode(),
+        "seed_path": "secrets/exam.seed",
+        "map_path": "secrets/none.csv",
+    }
+    one = {"name": "a.png", "file": base64.b64encode(b"x").decode()}
+
+    missing = client.post("/api/trace", {**base_request, "leaked": [one]})
+    empty = client.post("/api/trace", {**base_request, "leaked": []})
+    crowd = client.post("/api/trace", {**base_request, "leaked": [one] * 51})
+    odd = client.post("/api/trace", {**base_request, "leaked": ["a.png"]})
+
+    assert missing[0] == 400 and "매핑표" in missing[1]["error"]
+    assert empty[0] == 400 and crowd[0] == 400 and odd[0] == 400
+
+
+def test_progress_is_answered_only_with_the_token(desk: tuple[Client, Path]) -> None:
+    client, _ = desk
+
+    status, _, body = client.send("GET", f"/api/progress?t={client.token}")
+    refused, _, _ = client.send("GET", "/api/progress")
+
+    assert status == 200 and json.loads(body) == {"label": "", "done": 0, "total": 0}
+    assert refused == 403
+
+
+def test_the_page_offers_copies_and_trace_and_tells_where_paths_start(
+    desk: tuple[Client, Path],
+) -> None:
+    client, base = desk
+
+    _, _, page = client.send("GET", f"/?t={client.token}")
+    _, _, listed = client.send("GET", f"/api/profiles?t={client.token}")
+    text = page.decode("utf-8")
+
+    assert "수험번호별 복사본" in text and "유출본 추적" in text
+    assert 'id="copies-seed" type="text"' in text and 'type="file" id="copies-seed"' not in text
+    assert json.loads(listed)["base_dir"] == str(base.resolve())

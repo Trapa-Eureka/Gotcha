@@ -32,12 +32,16 @@ section { margin-top: 24px; padding: 20px; background: var(--panel); border: 1px
 h2 { margin: 0 0 4px; font-size: 1.1rem; }
 .hint { margin: 0 0 16px; color: var(--muted); font-size: 0.92rem; }
 label { display: block; margin: 14px 0 4px; font-weight: 600; font-size: 0.92rem; }
-input[type=file], select { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
+input[type=file], input[type=text], select, textarea { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px;
   background: var(--bg); color: var(--ink); font: inherit; }
+textarea { min-height: 96px; resize: vertical; font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+label.inline { display: flex; gap: 8px; align-items: center; font-weight: 400; }
+label.inline input { width: auto; }
+.base { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; }
 button { margin-top: 16px; padding: 9px 18px; border: 0; border-radius: 6px; background: var(--accent);
   color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer; }
 button:disabled { opacity: 0.5; cursor: progress; }
-button:focus-visible, select:focus-visible, input:focus-visible, a:focus-visible {
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, a:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px; }
 .about { margin: 6px 0 0; color: var(--muted); font-size: 0.9rem; }
 .warn { margin: 8px 0 0; padding: 8px 12px; border-radius: 6px; background: var(--warn-bg);
@@ -62,7 +66,7 @@ code { padding: 1px 5px; background: var(--code); border-radius: 4px; font-size:
 <main>
   <header>
     <h1>examshield</h1>
-    <p>시험 문서의 내용은 그대로 둔 채 복사본을 만들고, 원본과 같은지 검사한다.</p>
+    <p>시험 문서의 내용은 그대로 둔 채 복사본을 만들고, 원본과 같은지 검사하고, 유출본이 누구의 것인지 찾는다.</p>
     <span class="local">이 PC 안에서만 동작한다. 파일은 밖으로 나가지 않는다.</span>
   </header>
 
@@ -92,6 +96,43 @@ code { padding: 1px 5px; background: var(--code); border-radius: 4px; font-size:
     <div class="result" id="check-result" aria-live="polite"></div>
   </section>
 
+  <section aria-labelledby="copies-title">
+    <h2 id="copies-title">수험번호별 복사본</h2>
+    <p class="hint">수험번호마다 다른 무늬가 든 복사본을 만든다. 복사본은 내려받지 않고 출력 폴더에 쓴다. 시드 파일과 매핑표는 브라우저로 올리지 않고 경로만 적는다. 이 PC의 파일을 직접 읽고 쓴다.</p>
+    <p class="about">경로는 웹 화면을 띄운 폴더 기준으로 적는다: <span class="base" id="base-dir"></span></p>
+    <label for="copies-file">원본 파일</label>
+    <input id="copies-file" type="file" accept=".pdf,.docx,.hwp,.hwpx">
+    <label for="copies-profile">프로파일</label>
+    <select id="copies-profile"></select>
+    <p class="about" id="copies-about"></p>
+    <label for="copies-ids">수험번호 목록 (한 줄에 하나. CSV를 붙여 넣으면 첫 열을 쓴다)</label>
+    <textarea id="copies-ids" spellcheck="false" autocomplete="off"></textarea>
+    <label for="copies-seed">시드 파일 경로</label>
+    <input id="copies-seed" type="text" value="secrets/exam.seed" spellcheck="false" autocomplete="off">
+    <label for="copies-map">매핑표를 쓸 경로</label>
+    <input id="copies-map" type="text" value="secrets/exam.watermark-map.csv" spellcheck="false" autocomplete="off">
+    <label for="copies-out">출력 폴더</label>
+    <input id="copies-out" type="text" value="out/copies" spellcheck="false" autocomplete="off">
+    <label class="inline" for="copies-resume"><input id="copies-resume" type="checkbox"> 끊긴 작업을 이어 한다 (이미 만든 복사본은 그대로 둔다)</label>
+    <button id="copies-run" type="button">복사본 만들기</button>
+    <div class="result" id="copies-result" aria-live="polite"></div>
+  </section>
+
+  <section aria-labelledby="trace-title">
+    <h2 id="trace-title">유출본 추적</h2>
+    <p class="hint">유출된 PDF, 화면 캡처, 사진이 어느 수험번호의 복사본인지 찾는다. 같은 복사본을 찍은 것이면 여러 장을 함께 고른다.</p>
+    <label for="trace-leaked">유출본 (여러 개 고를 수 있다)</label>
+    <input id="trace-leaked" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff" multiple>
+    <label for="trace-original">변환 전 원본 파일</label>
+    <input id="trace-original" type="file" accept=".pdf,.docx,.hwp,.hwpx">
+    <label for="trace-seed">시드 파일 경로</label>
+    <input id="trace-seed" type="text" value="secrets/exam.seed" spellcheck="false" autocomplete="off">
+    <label for="trace-map">매핑표 경로</label>
+    <input id="trace-map" type="text" value="secrets/exam.watermark-map.csv" spellcheck="false" autocomplete="off">
+    <button id="trace-run" type="button">추적하기</button>
+    <div class="result" id="trace-result" aria-live="polite"></div>
+  </section>
+
   <section aria-labelledby="profiles-title">
     <h2 id="profiles-title">프로파일</h2>
     <p class="hint">검증 상태는 가장 최근 <code>verify</code> 리포트로 판정한다.</p>
@@ -106,8 +147,8 @@ code { padding: 1px 5px; background: var(--code); border-radius: 4px; font-size:
   <section aria-labelledby="cli-title">
     <h2 id="cli-title">명령줄에서만 되는 것</h2>
     <ul>
-      <li>수험번호별 복사본: <code>examshield protect --copies</code></li>
-      <li>유출본 추적: <code>examshield trace</code></li>
+      <li>정답표로 미끼가 정답을 피하게 하기: <code>examshield protect --answer-key</code></li>
+      <li>미끼 일치 분석: <code>examshield decoys</code></li>
       <li>AI 모델로 효과 측정: <code>examshield verify</code></li>
       <li>인쇄물 사진의 촬영 조건 재기: <code>examshield calibrate</code></li>
     </ul>
@@ -159,9 +200,9 @@ function showProfile() {
   box.replaceChildren();
   if (!chosen) return;
   if (chosen.needs_copies) {
-    box.append(el("p", "warn", "이 프로파일은 수험번호별 복사본용이다. 명령줄에서 examshield protect --copies로 쓴다."));
+    box.append(el("p", "warn", "이 프로파일은 수험번호별 복사본용이다. 아래의 '수험번호별 복사본'에서 만든다."));
   } else if (chosen.per_examinee) {
-    box.append(el("p", "warn", "여기서 만들면 무늬가 하나로 정해져 수험번호를 추적할 수 없다. 추적하려면 명령줄에서 --copies로 만든다."));
+    box.append(el("p", "warn", "여기서 만들면 무늬가 하나로 정해져 수험번호를 추적할 수 없다. 추적하려면 아래의 '수험번호별 복사본'에서 만든다."));
   }
   for (const warning of chosen.warnings) box.append(el("p", "warn", warning));
 }
@@ -228,11 +269,98 @@ async function runCheck() {
   }
 }
 
+function showCopiesProfile() {
+  const chosen = profiles.find((entry) => entry.name === byId("copies-profile").value);
+  byId("copies-about").textContent = chosen ? chosen.description : "";
+}
+
+async function watchProgress(box, running) {
+  // 오래 걸리는 일이라 몇 개 만들었는지 따로 물어 보여 준다.
+  while (running.on) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (!running.on) break;
+    try {
+      const response = await fetch("/api/progress?t=" + encodeURIComponent(TOKEN));
+      const state = await response.json();
+      if (running.on && state.total) {
+        box.replaceChildren(el("p", "about", state.label + " " + state.done + "/" + state.total + " 만드는 중이다."));
+      }
+    } catch (error) { /* 다음에 다시 물어 본다. */ }
+  }
+}
+
+async function runCopies() {
+  const box = byId("copies-result");
+  const file = byId("copies-file").files[0];
+  if (!file) return showError(box, new Error("원본 파일을 고른다."));
+  if (!byId("copies-ids").value.trim()) return showError(box, new Error("수험번호 목록을 적는다."));
+  const button = byId("copies-run");
+  const running = { on: true };
+  button.disabled = true;
+  box.replaceChildren(el("p", "about", "만드는 중이다. 수험번호가 많으면 시간이 걸린다."));
+  watchProgress(box, running);
+  try {
+    const answer = await call("/api/copies", {
+      name: file.name, file: await readBase64(file), profile: byId("copies-profile").value,
+      ids: byId("copies-ids").value, seed_path: byId("copies-seed").value,
+      map_path: byId("copies-map").value, out_dir: byId("copies-out").value,
+      resume: byId("copies-resume").checked,
+    });
+    running.on = false;
+    const nodes = [el("p", "verdict " + (answer.passed ? "ok" : "bad"),
+      answer.passed ? "복사본을 출력 폴더에 썼다." : "검사 실패. 복사본을 쓰지 않았다.")];
+    nodes.push(el("pre", "", answer.summary));
+    for (const note of answer.notes || []) nodes.push(el("p", "warn", note));
+    for (const warning of answer.warnings || []) nodes.push(el("p", "warn", warning));
+    box.replaceChildren(...nodes);
+  } catch (error) {
+    running.on = false;
+    showError(box, error);
+  } finally {
+    running.on = false;
+    button.disabled = false;
+  }
+}
+
+async function runTrace() {
+  const box = byId("trace-result");
+  const leaked = Array.from(byId("trace-leaked").files);
+  const original = byId("trace-original").files[0];
+  if (!leaked.length || !original) return showError(box, new Error("유출본과 원본을 모두 고른다."));
+  const button = byId("trace-run");
+  button.disabled = true;
+  box.replaceChildren(el("p", "about", "추적하는 중이다."));
+  try {
+    const files = [];
+    for (const file of leaked) files.push({ name: file.name, file: await readBase64(file) });
+    const answer = await call("/api/trace", {
+      name: original.name, file: await readBase64(original), leaked: files,
+      seed_path: byId("trace-seed").value, map_path: byId("trace-map").value,
+    });
+    box.replaceChildren(
+      el("p", "verdict " + (answer.found ? "ok" : "bad"), answer.found ? "찾았다" : "찾지 못했다"),
+      el("pre", "", answer.summary),
+    );
+  } catch (error) {
+    showError(box, error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadProfiles() {
   const response = await fetch("/api/profiles?t=" + encodeURIComponent(TOKEN));
   const answer = await response.json();
   if (!response.ok) throw new Error(answer.error || "프로파일을 읽지 못했다.");
   profiles = answer.profiles;
+  byId("base-dir").textContent = answer.base_dir;
+  const copiesSelect = byId("copies-profile");
+  for (const entry of profiles.filter((item) => item.per_examinee)) {
+    const option = el("option", "", entry.name);
+    option.value = entry.name;
+    copiesSelect.append(option);
+  }
+  showCopiesProfile();
   const select = byId("protect-profile");
   const body = byId("profiles-body");
   for (const entry of profiles) {
@@ -251,6 +379,9 @@ async function loadProfiles() {
 byId("protect-profile").addEventListener("change", showProfile);
 byId("protect-run").addEventListener("click", runProtect);
 byId("check-run").addEventListener("click", runCheck);
+byId("copies-profile").addEventListener("change", showCopiesProfile);
+byId("copies-run").addEventListener("click", runCopies);
+byId("trace-run").addEventListener("click", runTrace);
 loadProfiles().catch((error) => showError(byId("protect-result"), error));
 </script>
 </body>

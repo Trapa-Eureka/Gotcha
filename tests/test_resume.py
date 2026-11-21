@@ -113,7 +113,7 @@ def test_the_table_grows_as_copies_are_written(
     workspace: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """네 번째 복사본을 쓰다가 죽으면, 앞의 셋은 매핑표에 적혀 있고 이어 할 수 있다."""
-    import examshield.cli as cli  # noqa: PLC0415
+    import examshield.protect.batch as cli  # noqa: PLC0415
 
     real = cli.write_outputs
     written: list[str] = []

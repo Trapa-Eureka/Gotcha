@@ -46,7 +46,7 @@ It is for teachers, exam writers and assessment bodies who hand out online exams
 | Model drift warnings (`protect` warns when verification is missing, older than 30 days or below the bar), `examshield profile list\|show` | Done (no verification record from a real AI yet) |
 | Scenario B (printed exams): dot-pattern profile `b-dots`, examinee number recovery from a photo of the printed page, `examshield calibrate` | Implemented (checked with the capture simulation only, never with real printing and photographing; per-item semantic decoys are not built) |
 | Single executable for air-gapped networks (macOS) | Implemented (run on the Mac that built it; not checked on another Mac or on a machine without network; no Windows build yet) |
-| Local web page `examshield ui` — make a copy, check sameness, list profiles | Implemented (listens on 127.0.0.1 only) |
+| Local web page `examshield ui` — make a copy, check sameness, per-examinee copies, trace a leak, list profiles | Implemented (listens on 127.0.0.1 only. The seed and the mapping table are never uploaded; only their paths are typed) |
 | Hangul (.hwp, .hwpx) input | Implemented (tested only with a stand-in converter, without LibreOffice; never checked with a real Hangul file) |
 | License | AGPL-3.0-or-later applied. The profile subscription will not be a paid product |
 
@@ -211,7 +211,7 @@ uv run examshield trace out/capture.png --original document.pdf \
 - For a Hangul document, the PDF that LibreOffice produces is taken as the original. LibreOffice may not carry over fonts, tables and page breaks faithfully, and some versions cannot open the file at all. `check` guarantees only that the converted PDF and the copy are the same. Whether it looks like what Hangul shows has to be checked by a person. The safe route is a PDF exported from Hangul itself.
 - The single executable was run only on the Mac that built it (Apple Silicon). It was not checked on another Mac, an Intel Mac or a machine without network. It is not signed or notarized, so Gatekeeper may block it on another Mac. It unpacks into the system temp folder on every start and takes about 4 seconds to start. There is no Windows build yet.
 - Tesseract and LibreOffice are not in the executable. LibreOffice is several hundred MB, and bundling Tesseract means relocating Homebrew libraries, which breaks easily. Without them the OCR comparison is skipped (and that is stated), and Word and Hangul input are refused. The cloud SDKs are left out too, so the executable cannot verify against cloud models.
-- The web page only makes a copy (one file), checks sameness and lists profiles. Per-examinee copies, tracing and measuring are done on the command line. Only Chrome was used to confirm the page opens. Uploads are handled in memory (up to 100 MB per request), one document at a time.
+- The web page makes a copy (one file), checks sameness, makes per-examinee copies, traces a leak and lists profiles. The answer key, decoy analysis and measuring are done on the command line. Paths typed for per-examinee copies and tracing are accepted only inside the folder where `examshield ui` was started. Whoever holds the token in the address can have copies and a mapping table written inside that folder, so do not give the address away. Checked with Chrome only (making 12 copies and tracing two captures). Uploads are handled in memory (up to 100 MB per request), one document at a time.
 - The safety hooks are a safety net that matches command text. A wrapped or indirect command can slip past them.
 
 ## Pricing
