@@ -45,7 +45,7 @@ It is for teachers, exam writers and assessment bodies who hand out online exams
 | `examshield decoys` — how closely answer sheets match the hidden decoys, and how likely that is by chance. Decoys can differ per question and per examinee, which tells an examinee who fed their own copy to an AI from one who copied those answers | Implemented (checked with made-up answers only, never with real exam answers; with several items on a page, whether Claude follows the decoys changes from run to run (4 of 36, then 16 on a repeat), so it cannot be relied on) |
 | Model drift warnings (`protect` warns when verification is missing, older than 30 days or below the bar), `examshield profile list\|show` | Done (no verification record from a real AI yet) |
 | Scenario B (printed exams): dot-pattern profile `b-dots`, examinee number recovery from a photo of the printed page, `examshield calibrate` | Implemented (checked with the capture simulation only, never with real printing and photographing; per-item semantic decoys are not built) |
-| Single executable for air-gapped networks (macOS) | Implemented (run on the Mac that built it; not checked on another Mac or on a machine without network; no Windows build yet) |
+| Executable for air-gapped networks (macOS), as one file and as a folder | Implemented (run on the Mac that built it; not checked on another Mac or on a machine without network; no Windows build yet) |
 | Local web page `examshield ui` — make a copy, check sameness, per-examinee copies, trace a leak, list profiles | Implemented (listens on 127.0.0.1 only. The seed and the mapping table are never uploaded; only their paths are typed) |
 | Hangul (.hwp, .hwpx) input | Implemented (tested only with a stand-in converter, without LibreOffice; never checked with a real Hangul file) |
 | License | AGPL-3.0-or-later applied. The profile subscription will not be a paid product |
@@ -84,11 +84,11 @@ The package is not on PyPI yet. Once it is, the plan is to make this work:
 uv tool install examshield
 ```
 
-For a machine without Python and uv, build a single executable. This works on macOS only.
+For a machine without Python and uv, build an executable. This works on macOS only.
 
 ```bash
 uv sync
-packaging/build-macos.sh    # dist/examshield (about 120 MB)
+packaging/build-macos.sh    # one file dist/examshield (about 120 MB) and the folder build dist/examshield-macos-folder.zip
 ```
 
 Copy the file to another Mac and run it as is. Tesseract and LibreOffice are not inside. If that machine has them installed they are found and used; without them PDF processing still works.
@@ -209,7 +209,7 @@ uv run examshield trace out/capture.png --original document.pdf \
 - The drift bar (for each AI model, on the path it solved best, accuracy on the protected copy at most half of the control) and the 30 days are values chosen here; the spec gives no numbers. With 12 items, one or two answers can flip the verdict.
 - Marking a profile that fell below the bar as `deprecated` is not automatic. `protect` warns that it should be changed, and a person edits the profile YAML.
 - For a Hangul document, the PDF that LibreOffice produces is taken as the original. LibreOffice may not carry over fonts, tables and page breaks faithfully, and some versions cannot open the file at all. `check` guarantees only that the converted PDF and the copy are the same. Whether it looks like what Hangul shows has to be checked by a person. The safe route is a PDF exported from Hangul itself.
-- The single executable was run only on the Mac that built it (Apple Silicon). It was not checked on another Mac, an Intel Mac or a machine without network. It is not signed or notarized, so Gatekeeper may block it on another Mac. It unpacks into the system temp folder on every start and takes about 4 seconds to start. There is no Windows build yet.
+- Both executables were run only on the Mac that built them (Apple Silicon). They were not checked on another Mac, an Intel Mac or a machine without network. They are not signed or notarized, so Gatekeeper may block them on another Mac. The one-file build unpacks into the system temporary folder on every run, so it takes about 5 seconds to start, and each worker process of `--copies` unpacks it again. The folder build starts in 0.4 seconds and made 64 examinee copies with 8 processes in 4.7 seconds (9.0 for the one-file build). There is no Windows build yet.
 - Tesseract and LibreOffice are not in the executable. LibreOffice is several hundred MB, and bundling Tesseract means relocating Homebrew libraries, which breaks easily. Without them the OCR comparison is skipped (and that is stated), and Word and Hangul input are refused. The cloud SDKs are left out too, so the executable cannot verify against cloud models.
 - The web page makes a copy (one file), checks sameness, makes per-examinee copies, traces a leak and lists profiles. The answer key, decoy analysis and measuring are done on the command line. Paths typed for per-examinee copies and tracing are accepted only inside the folder where `examshield ui` was started. Whoever holds the token in the address can have copies and a mapping table written inside that folder, so do not give the address away. Checked with Chrome only (making 12 copies and tracing two captures). Uploads are handled in memory (up to 100 MB per request), one document at a time.
 - The safety hooks are a safety net that matches command text. A wrapped or indirect command can slip past them.
@@ -254,7 +254,7 @@ Gotcha/
 │   ├── netguard.py    # refuses network access when offline is set
 │   └── pdfio.py       # PDF reading, rendering, deterministic saving
 ├── tests/
-├── packaging/         # build-macos.sh: builds the single executable
+├── packaging/         # build-macos.sh: builds the executable (one file, folder)
 ├── spec/              # the work spec (the original, split by section)
 ├── .claude/
 │   ├── settings.json  # deny rules, hook registration

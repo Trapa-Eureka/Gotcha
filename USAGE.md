@@ -559,10 +559,21 @@ uv run examshield ui
 
 ```bash
 uv sync
-packaging/build-macos.sh
+packaging/build-macos.sh            # 둘 다 만든다
+packaging/build-macos.sh onefile    # 파일 하나만
+packaging/build-macos.sh folder     # 폴더 형태만
 ```
 
-`dist/examshield` 파일 하나가 나온다(약 120MB). Python과 uv가 없는 맥으로 옮겨 그대로 실행한다.
+두 가지가 나온다. Python과 uv가 없는 맥으로 옮겨 그대로 실행한다.
+
+| 형태 | 나오는 것 | 옮기는 법 | 시작 | 수험번호 64개 (`a-full`, 프로세스 8개) |
+|---|---|---|---|---|
+| 파일 하나 | `dist/examshield` (약 120MB) | 파일 하나를 복사한다 | 약 5초 | 9.0초 |
+| 폴더 | `dist/examshield-macos-folder.zip` (약 130MB, 풀면 약 230MB) | 묶음을 옮겨 풀고 폴더 안의 `examshield`를 실행한다 | 0.4초 | 4.7초 |
+
+파일 하나짜리는 실행할 때마다 시스템 임시 폴더에 풀린다. `--copies`가 띄우는 작업 프로세스도 저마다 다시 푼다. 폴더 형태는 이미 풀려 있어서 그 시간이 들지 않는다. 한두 번 쓰거나 옮기기 쉬워야 하면 파일 하나를, 수험번호별 복사본을 많이 만들거나 자주 쓰면 폴더를 고른다. 두 형태가 만드는 복사본은 바이트까지 같다. 위 시간은 만든 맥에서 한 번씩 잰 값이다. 폴더 형태도 옮긴 뒤 처음 실행할 때는 macOS가 파일을 확인하느라 몇 초가 걸린다.
+
+폴더 형태는 폴더째로 옮긴다. 안의 `examshield` 파일만 꺼내면 실행되지 않는다. 묶음은 `ditto -x -k examshield-macos-folder.zip <풀 곳>`이나 Finder로 푼다.
 
 ```bash
 ./examshield protect 시험지.pdf --out out/copies --profile a-remap-decoy
@@ -581,7 +592,6 @@ Tesseract와 LibreOffice를 넣지 않은 이유는 이렇다. LibreOffice는 �
 - 실행 파일에서는 `verify --record`를 쓸 수 없다. 기록할 저장소가 없기 때문이다.
 - 만든 맥(Apple Silicon)에서만 실행해 봤다. 다른 맥, 인텔 맥, 네트워크가 끊긴 PC에서는 확인하지 못했다.
 - 서명과 공증을 하지 않았다. 다른 맥으로 옮기면 Gatekeeper가 막을 수 있다. 그때는 그 맥에서 `xattr -d com.apple.quarantine examshield`로 격리 표시를 지운다.
-- 실행할 때마다 시스템 임시 폴더에 풀린다. 시작에 약 4초가 걸린다.
 - Windows용은 아직 없다. Windows에서 따로 만들어야 한다.
 
 ## 프로파일 보기 (profile)
