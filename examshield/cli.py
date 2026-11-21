@@ -55,8 +55,7 @@ from examshield.trace.decoys import (
     read_decoys,
     read_responses,
 )
-from examshield.trace.detect import format_trace
-from examshield.trace.detect import trace as trace_document
+from examshield.trace.detect import MAX_LEAKED_FILES, format_trace, trace_many
 from examshield.ui.server import make_server
 from examshield.verify.calibrate import (
     decode_photo,
@@ -831,19 +830,26 @@ def _protect_copies(
     help="유출된 PDF나 화면 캡처가 어느 수험번호의 복사본인지 찾는다. 못 찾으면 종료 코드 1."
 )
 def trace(
-    leaked: Path = typer.Argument(..., metavar="유출본", help="PDF 또는 그림 파일(png, jpg 등)"),
+    leaked: list[Path] = typer.Argument(
+        ...,
+        metavar="유출본...",
+        help="PDF 또는 그림 파일(png, jpg 등). 같은 복사본을 찍은 것이면 여러 개를 함께 준다.",
+    ),
     original: Path = typer.Option(..., "--original", help="변환 전 원본(PDF, .docx, .hwp, .hwpx)"),
     map_file: Path = typer.Option(..., "--map-file", help="protect --copies가 쓴 매핑표"),
     seed_file: Path = typer.Option(..., "--seed-file", help="protect --copies에 쓴 시드 파일"),
 ) -> None:
     try:
-        for path in (leaked, original, map_file, seed_file):
+        for path in (*leaked, original, map_file, seed_file):
             if not path.is_file():
                 raise ExamShieldError(f"파일을 찾지 못했다: {path}")
-        result = trace_document(
-            leaked.read_bytes(),
-            leaked.suffix,
-            read_document(original, leaked.resolve().parent),
+        if len(leaked) > MAX_LEAKED_FILES:
+            raise ExamShieldError(
+                f"유출본은 한 번에 {MAX_LEAKED_FILES}개까지 받는다. 같은 복사본의 것만 골라서 준다."
+            )
+        result = trace_many(
+            [(path.name, path.read_bytes(), path.suffix) for path in leaked],
+            read_document(original, leaked[0].resolve().parent),
             read_map(map_file),
             seed_file.read_bytes(),
         )

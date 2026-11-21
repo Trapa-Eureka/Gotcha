@@ -755,3 +755,29 @@ def test_a_small_photo_of_a_page_dense_with_hangul_is_still_registered() -> None
     assert base.passed
     assert result.found and result.examinee_id == IDS[1], result
     assert measured.page_width_px == pytest.approx(1400, rel=0.03)
+
+
+def test_photos_of_several_pages_are_combined(
+    sample_pdf: bytes, copies: list[Any], table: list[MapRow]
+) -> None:
+    from examshield.trace.detect import format_trace, trace_many  # noqa: PLC0415
+
+    photos = [
+        (
+            f"photo-{page}.jpg",
+            jpeg(photograph(copies[7].protected.pdf, page, CaptureConditions())),
+            ".jpg",
+        )
+        for page in range(3)
+    ]
+
+    alone = [trace(data, suffix, sample_pdf, table, SEED) for _, data, suffix in photos]
+    together = trace_many(photos, sample_pdf, table, SEED)
+
+    assert together.found and together.examinee_id == IDS[7]
+    assert together.method == "여러 장 합산" and together.cells == sum(r.cells for r in alone)
+    # 합친 점수는 어느 한 장의 점수보다 높다.
+    assert together.score is not None
+    assert together.score > max(result.score or 0.0 for result in alone)
+    assert sorted(part.pages for _, part in together.parts) == [(1,), (2,), (3,)]
+    assert "유출본별 결과" in format_trace(together)

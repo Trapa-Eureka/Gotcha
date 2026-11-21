@@ -21,7 +21,7 @@ from examshield.protect.copies import (
 )
 from examshield.protect.pipeline import protect_bytes
 from examshield.protect.techniques import watermark
-from examshield.trace.detect import trace
+from examshield.trace.detect import format_trace, trace
 
 runner = CliRunner()
 SEED = b"0123456789abcdef-institution-seed"
@@ -623,6 +623,7 @@ def test_trace_stops_reading_pages_once_one_names_the_examinee(sample_pdf: bytes
     from examshield.trace import detect  # noqa: PLC0415
 
     keys = [watermark.derive_key(SEED, examinee) for examinee in IDS]
+    reader = detect._Reader(b"", [], 8, IDS, keys, dots=False)
     rows, cols = 100, 80
     rng = np.random.default_rng(3)
     read: list[int] = []
@@ -641,14 +642,15 @@ def test_trace_stops_reading_pages_once_one_names_the_examinee(sample_pdf: bytes
             read.append(index)
             yield page_of(owner, index)
 
-    found = detect._best_page(pages([None, keys[7], None, None]), IDS, keys, "이미지 정합")
+    found, used = detect._best_page(pages([None, keys[7], None, None]), reader, "이미지 정합")
     assert found.found and found.examinee_id == IDS[7] and found.pages == (2,)
-    assert read == [0, 1]
+    assert read == [0, 1] and [entry.page_index for entry in used] == [1]
 
     read.clear()
-    nobody = detect._best_page(pages([None, None, None]), IDS, keys, "이미지 정합")
-    assert not nobody.found and read == [0, 1, 2]
-    assert not detect._best_page(iter(()), IDS, keys, "이미지 정합").found
+    nobody, kept = detect._best_page(pages([None, None, None]), reader, "이미지 정합")
+    assert not nobody.found and read == [0, 1, 2] and len(kept) == 1
+    empty, nothing = detect._best_page(iter(()), reader, "이미지 정합")
+    assert not empty.found and nothing == []
 
 
 def test_the_page_in_a_capture_is_ranked_first_before_exact_matching() -> None:
@@ -675,14 +677,130 @@ def test_the_page_in_a_capture_is_ranked_first_before_exact_matching() -> None:
 
         pages.full = counted  # type: ignore[method-assign]
         drawn.clear()
-        found = detect._best_page(
-            detect._from_image(encode_png(shot), pages, detect.page_sizes(pdf), 8),
+        reader = detect._Reader(
+            pdf,
+            detect.page_sizes(pdf),
+            8,
             IDS[:6],
             [watermark.derive_key(SEED, examinee) for examinee in IDS[:6]],
-            "이미지 정합",
+            dots=False,
         )
+        found, _ = detect._best_page(detect._from_image(reader, shot, pages), reader, "이미지 정합")
         # 찍힌 쪽 하나만 크게 그려 맞춰 봤다.
         assert found.found and found.examinee_id == IDS[3] and found.pages == (number + 1,)
         assert drawn == [number]
         result = trace(encode_png(shot), ".png", pdf, table, SEED)
         assert result.found and result.examinee_id == IDS[3]
+
+
+def many_copies() -> tuple[bytes, list[MapRow], list[bytes]]:
+    from examshield.benchmark import load_items, render_items_pdf  # noqa: PLC0415
+
+    pdf = render_items_pdf(load_items().items)
+    _, made = protect_copies(pdf, load_profile("a-watermark"), SEED, IDS[:8])
+    copies = list(made)
+    rows = [map_row(copy, SEED, f"{copy.examinee_id}.pdf") for copy in copies]
+    return pdf, rows, [copy.protected.pdf for copy in copies]
+
+
+def small_shot(copy: bytes, page: int) -> bytes:
+    """크게 확대해서 쪽의 작은 부분만 찍힌 캡처. 한 장으로는 읽을 칸이 모자란다."""
+    from examshield.pdfio import render_gray  # noqa: PLC0415
+    from examshield.verify.capture_sim import encode_png  # noqa: PLC0415
+
+    full = render_gray(open_pdf_bytes(copy)[page], 150)
+    return encode_png(full[160:300, 130:430])
+
+
+def test_several_small_captures_together_name_the_examinee_no_single_one_can() -> None:
+    from examshield.trace.detect import trace_many  # noqa: PLC0415
+
+    pdf, rows, copies = many_copies()
+    shots = [(f"shot-{page}.png", small_shot(copies[5], page), ".png") for page in range(6)]
+
+    alone = [trace(data, suffix, pdf, rows, SEED) for _, data, suffix in shots]
+    together = trace_many(shots, pdf, rows, SEED)
+
+    assert not any(result.found for result in alone)
+    assert together.found and together.examinee_id == IDS[5]
+    assert together.method == "여러 장 합산"
+    assert together.cells == sum(result.cells for result in alone)
+    assert [label for label, _ in together.parts] == [name for name, _, _ in shots]
+    assert "유출본별 결과" in format_trace(together)
+
+
+def test_one_file_gives_the_same_answer_as_before_and_has_no_parts() -> None:
+    from examshield.pdfio import render_gray  # noqa: PLC0415
+    from examshield.trace.detect import trace_many  # noqa: PLC0415
+    from examshield.verify.capture_sim import encode_png  # noqa: PLC0415
+
+    pdf, rows, copies = many_copies()
+    shot = encode_png(render_gray(open_pdf_bytes(copies[2])[3], 130))
+
+    single = trace(shot, ".png", pdf, rows, SEED)
+    listed = trace_many([("one.png", shot, ".png")], pdf, rows, SEED)
+
+    assert single == listed and single.found and single.parts == ()
+    assert "유출본별 결과" not in format_trace(single)
+
+
+def test_captures_from_two_examinees_are_reported_one_by_one() -> None:
+    from examshield.pdfio import render_gray  # noqa: PLC0415
+    from examshield.trace.detect import trace_many  # noqa: PLC0415
+    from examshield.verify.capture_sim import encode_png  # noqa: PLC0415
+
+    pdf, rows, copies = many_copies()
+    first = encode_png(render_gray(open_pdf_bytes(copies[1])[0], 130))
+    second = encode_png(render_gray(open_pdf_bytes(copies[6])[1], 130))
+
+    result = trace_many([("a.png", first, ".png"), ("b.png", second, ".png")], pdf, rows, SEED)
+    shown = format_trace(result)
+
+    assert not result.found and set(result.suspects) == {IDS[1], IDS[6]}
+    assert [part.examinee_id for _, part in result.parts] == [IDS[1], IDS[6]]
+    assert "유출본마다 다른 수험번호" in shown
+
+
+def test_a_pdf_of_pasted_captures_is_read_page_by_page() -> None:
+    """캡처를 붙여 만든 PDF는 쪽수도 쪽 크기도 원본과 다르다. 쪽마다 그림으로 읽어 합친다."""
+    import pymupdf  # noqa: PLC0415
+
+    pdf, rows, copies = many_copies()
+    bundle = pymupdf.open()
+    for page in (2, 7, 9):
+        pixmap = open_pdf_bytes(copies[4])[page].get_pixmap(dpi=120)
+        sheet = bundle.new_page(width=700, height=1000)
+        sheet.insert_image(pymupdf.Rect(30, 40, 670, 945), pixmap=pixmap)
+    leaked = bytes(bundle.tobytes())
+
+    result = trace(leaked, ".pdf", pdf, rows, SEED)
+
+    assert result.found and result.examinee_id == IDS[4]
+    assert result.method == "여러 장 합산" and len(result.parts) == 3
+    assert [part.pages for _, part in result.parts] == [(3,), (8,), (10,)]
+
+
+def test_cli_trace_takes_several_leaked_files(tmp_path: Path) -> None:
+    from examshield.protect.copies import write_map  # noqa: PLC0415
+
+    pdf, rows, copies = many_copies()
+    (tmp_path / "exam.pdf").write_bytes(pdf)
+    (tmp_path / "exam.seed").write_bytes(SEED)
+    write_map(tmp_path / "map.csv", rows)
+    names = []
+    for page in range(6):
+        names.append(str(tmp_path / f"shot-{page}.png"))
+        Path(names[-1]).write_bytes(small_shot(copies[5], page))
+    common = [
+        "--original", str(tmp_path / "exam.pdf"),
+        "--map-file", str(tmp_path / "map.csv"), "--seed-file", str(tmp_path / "exam.seed"),
+    ]  # fmt: skip
+
+    one = runner.invoke(app, ["trace", names[0], *common])
+    all_of_them = runner.invoke(app, ["trace", *names, *common])
+    missing = runner.invoke(app, ["trace", names[0], str(tmp_path / "none.png"), *common])
+
+    assert one.exit_code == 1
+    assert all_of_them.exit_code == 0, all_of_them.output
+    assert IDS[5] in all_of_them.output and "여러 장 합산" in all_of_them.output
+    assert missing.exit_code == 2

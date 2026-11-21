@@ -1,5 +1,5 @@
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,7 @@ MIN_SCORE = 6.0
 MIN_MARGIN = 3.0
 MIN_INLIERS = 20
 MATCH_RATIO = 0.75
+MAX_LEAKED_FILES = 50
 # 쪽 순서를 정할 때 쓰는 줄인 그림의 긴 변과 특징점 수.
 COARSE_SIDE = 700
 COARSE_FEATURES = 1500
@@ -64,10 +65,8 @@ class TraceResult:
     pages: tuple[int, ...]
     reason: str = ""
     suspects: tuple[str, ...] = ()
-
-
-def load_reference(pdf: bytes, dpi: int = TRACE_DPI) -> list[Gray]:
-    return [render_gray(page, dpi) for page in open_plain_pdf(pdf, "원본")]
+    # 유출본을 여러 개 줬을 때 파일(또는 쪽)마다의 결과. (이름, 결과)
+    parts: tuple[tuple[str, "TraceResult"], ...] = ()
 
 
 class _Pages:
@@ -94,6 +93,31 @@ def page_sizes(pdf: bytes) -> list[tuple[float, float]]:
     return [(page.rect.width, page.rect.height) for page in open_plain_pdf(pdf, "원본")]
 
 
+@dataclass(frozen=True)
+class _Reader:
+    """매핑표의 무늬를 읽는 데 드는 것. 워터마크와 점 무늬가 읽는 방법만 다르다."""
+
+    original: bytes
+    sizes: list[tuple[float, float]]
+    cell_pt: int
+    ids: list[str]
+    keys: list[bytes]
+    dots: bool
+
+    @property
+    def dpi(self) -> int:
+        return DOTS_DPI if self.dots else TRACE_DPI
+
+    def read(
+        self, image: Gray, valid: NDArray[np.bool_], reference: Gray, index: int
+    ) -> Evidence | None:
+        reader = _read_dots if self.dots else _read_cells
+        return reader(image, valid, reference, self.sizes[index], self.cell_pt, index)
+
+    def decide(self, evidence: list[Evidence], method: str) -> TraceResult:
+        return _decide(evidence, self.ids, self.keys, method)
+
+
 def trace(
     leaked: bytes,
     suffix: str,
@@ -101,44 +125,91 @@ def trace(
     rows: list[MapRow],
     seed: bytes,
 ) -> TraceResult:
-    keys = _keys(rows, seed)
-    digest = sha256_hex(leaked)
-    for row in rows:
-        if row.output_sha256 == digest:
-            return TraceResult(True, "파일 해시 일치", row.examinee_id, None, None, 0, ())
-    sizes = page_sizes(original)
-    cell_pt = rows[0].cell_pt
-    suffix = suffix.lower()
-    ids = [row.examinee_id for row in rows]
-    if rows[0].kind == DOTS:
-        return _trace_dots(leaked, suffix, original, sizes, cell_pt, ids, keys)
-    if suffix == PDF_SUFFIX:
-        reference = load_reference(original)
-        return _decide(_from_pdf(leaked, reference, sizes, cell_pt), ids, keys, "PDF 렌더링")
-    if suffix not in IMAGE_SUFFIXES:
-        raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
-    pages = _Pages(original, TRACE_DPI)
-    return _best_page(_from_image(leaked, pages, sizes, cell_pt), ids, keys, "이미지 정합")
+    return trace_many([("", leaked, suffix)], original, rows, seed)
 
 
-def _best_page(
-    candidates: Iterator[Evidence], ids: list[str], keys: list[bytes], method: str
+def trace_many(
+    files: list[tuple[str, bytes, str]],
+    original: bytes,
+    rows: list[MapRow],
+    seed: bytes,
 ) -> TraceResult:
-    """잘 맞는 쪽부터 하나씩 읽어, 수험번호가 뚜렷하게 나오면 거기서 멈춘다.
+    """유출본 여러 개(이름, 내용, 확장자)를 함께 본다.
 
+    같은 복사본의 여러 쪽을 찍은 그림이나 사진이면, 한 장으로는 칸이 모자라 못 찾는 것도
+    읽어 낸 칸을 모두 합쳐서 찾을 수 있다. 서로 다른 응시자의 복사본이 섞여 있으면 합친 점수가
+    여럿을 가리키거나 아무도 가리키지 못한다. 그때는 파일별 결과를 본다.
+    """
+    keys = _keys(rows, seed)
+    for _, data, _ in files:
+        digest = sha256_hex(data)
+        for row in rows:
+            if row.output_sha256 == digest:
+                return TraceResult(True, "파일 해시 일치", row.examinee_id, None, None, 0, ())
+    reader = _Reader(
+        original=original,
+        sizes=page_sizes(original),
+        cell_pt=rows[0].cell_pt,
+        ids=[row.examinee_id for row in rows],
+        keys=keys,
+        dots=rows[0].kind == DOTS,
+    )
+    parts: list[tuple[str, TraceResult, list[Evidence]]] = []
+    for label, data, suffix in files:
+        kind = suffix.lower()
+        if kind == PDF_SUFFIX:
+            whole = _from_pdf(reader, data)
+            if whole is not None:
+                parts.append((label, reader.decide(whole, "PDF 렌더링"), whole))
+                continue
+            # 쪽수나 쪽 크기가 원본과 다른 PDF는 캡처나 사진을 묶은 것으로 보고 쪽마다 그림으로 읽는다.
+            for number, image in enumerate(_pdf_pages(data, reader.dpi), start=1):
+                name = f"{label} {number}쪽".strip()
+                parts.append((name, *_from_shot(reader, image)))
+        elif kind in IMAGE_SUFFIXES:
+            parts.append((label, *_from_shot(reader, decode_photo(data))))
+        else:
+            raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
+    if len(parts) == 1:
+        return parts[0][1]
+    combined = reader.decide(
+        [entry for _, _, evidence in parts for entry in evidence], "여러 장 합산"
+    )
+    return replace(combined, parts=tuple((label, result) for label, result, _ in parts))
+
+
+def _pdf_pages(leaked: bytes, dpi: int) -> Iterator[Gray]:
+    for page in open_plain_pdf(leaked, "유출본"):
+        yield render_gray(page, dpi)
+
+
+def _from_shot(reader: _Reader, shot: Gray) -> tuple[TraceResult, list[Evidence]]:
+    """그림 한 장에서 읽어 낸 결과와, 합산에 쓸 칸.
+
+    잘 맞는 쪽부터 하나씩 읽어, 수험번호가 뚜렷하게 나오면 거기서 멈춘다.
     내용이 같은 쪽이 여럿이면 어느 쪽인지 그림만으로는 모른다. 그래서 맞춰지는 쪽을 차례로 재 본다.
     엉뚱한 쪽의 무늬로는 기준을 넘는 점수가 나오지 않으므로, 뚜렷한 답이 나오면 나머지는 재지 않는다.
     끝까지 뚜렷한 답이 없으면 그중 점수가 가장 높은 것을 돌려준다.
     """
-    results = []
+    method = "사진 정합" if reader.dots else "이미지 정합"
+    pages = _Pages(reader.original, reader.dpi)
+    candidates = (
+        _from_photo(reader, shot, pages) if reader.dots else _from_image(reader, shot, pages)
+    )
+    return _best_page(candidates, reader, method)
+
+
+def _best_page(
+    candidates: Iterator[Evidence], reader: _Reader, method: str
+) -> tuple[TraceResult, list[Evidence]]:
+    best: tuple[TraceResult, list[Evidence]] | None = None
     for found in candidates:
-        result = _decide([found], ids, keys, method)
+        result = reader.decide([found], method)
         if result.found:
-            return result
-        results.append(result)
-    if not results:
-        return _decide([], ids, keys, method)
-    return max(results, key=lambda result: result.score or 0.0)
+            return result, [found]
+        if best is None or (result.score or 0.0) > (best[0].score or 0.0):
+            best = (result, [found])
+    return best if best is not None else (reader.decide([], method), [])
 
 
 def _keys(rows: list[MapRow], seed: bytes) -> list[bytes]:
@@ -152,71 +223,26 @@ def _keys(rows: list[MapRow], seed: bytes) -> list[bytes]:
     return keys
 
 
-def _trace_dots(
-    leaked: bytes,
-    suffix: str,
-    original: bytes,
-    sizes: list[tuple[float, float]],
-    cell_pt: int,
-    ids: list[str],
-    keys: list[bytes],
-) -> TraceResult:
-    """점 무늬가 든 복사본. PDF, 화면 캡처, 인쇄물을 찍은 사진을 다룬다."""
-    if suffix == PDF_SUFFIX:
-        reference = load_reference(original, DOTS_DPI)
-        doc = open_plain_pdf(leaked, "유출본")
-        if doc.page_count != len(reference):
-            raise ExamShieldError(
-                f"유출본의 쪽수({doc.page_count})가 원본({len(reference)})과 다르다. "
-                "쪽을 그림으로 저장해서 한 쪽씩 넣는다."
-            )
-        evidence = []
-        for index, page in enumerate(doc):
-            image = render_gray(page, DOTS_DPI)
-            if image.shape != reference[index].shape:
-                raise ExamShieldError(f"{index + 1}쪽의 크기가 원본과 다르다.")
-            found = _read_dots(
-                image,
-                np.ones(image.shape, dtype=bool),
-                reference[index],
-                sizes[index],
-                cell_pt,
-                index,
-            )
-            if found is not None:
-                evidence.append(found)
-        return _decide(evidence, ids, keys, "PDF 렌더링")
-    if suffix not in IMAGE_SUFFIXES:
-        raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
-    shot = decode_photo(leaked)
+def _from_photo(reader: _Reader, shot: Gray, pages: "_Pages") -> Iterator[Evidence]:
+    """점 무늬가 든 복사본의 화면 캡처나 인쇄물 사진. 기울기와 원근 왜곡까지 바로잡는다."""
     known = features(shot)
-    pages = _Pages(original, DOTS_DPI)
-
-    def read() -> Iterator[Evidence]:
-        # 사진에 찍힌 쪽일 가능성이 높은 쪽부터 정밀하게 맞춰 본다. 맞춰 보는 일이 가장 오래 걸린다.
-        for index in _likely_pages(shot, pages):
-            page = pages.full(index)
-            fit = register(shot, page, known)
-            if fit is None:
-                continue
-            matrix = fit[1]
-            height, width = page.shape
-            warped = cv2.warpPerspective(shot, matrix, (width, height), flags=cv2.INTER_LINEAR)
-            covered = cv2.warpPerspective(
-                np.full(shot.shape, 255, dtype=np.uint8), matrix, (width, height)
-            )
-            evidence = _read_dots(
-                np.asarray(warped, dtype=np.uint8),
-                np.asarray(covered) == 255,
-                page,
-                sizes[index],
-                cell_pt,
-                index,
-            )
-            if evidence is not None:
-                yield evidence
-
-    return _best_page(read(), ids, keys, "사진 정합")
+    # 사진에 찍힌 쪽일 가능성이 높은 쪽부터 정밀하게 맞춰 본다. 맞춰 보는 일이 가장 오래 걸린다.
+    for index in _likely_pages(shot, pages):
+        page = pages.full(index)
+        fit = register(shot, page, known)
+        if fit is None:
+            continue
+        matrix = fit[1]
+        height, width = page.shape
+        warped = cv2.warpPerspective(shot, matrix, (width, height), flags=cv2.INTER_LINEAR)
+        covered = cv2.warpPerspective(
+            np.full(shot.shape, 255, dtype=np.uint8), matrix, (width, height)
+        )
+        evidence = reader.read(
+            np.asarray(warped, dtype=np.uint8), np.asarray(covered) == 255, page, index
+        )
+        if evidence is not None:
+            yield evidence
 
 
 def _read_dots(
@@ -282,32 +308,29 @@ def _read_dots(
     )
 
 
-def _from_pdf(
-    leaked: bytes, reference: list[Gray], sizes: list[tuple[float, float]], cell_pt: int
-) -> list[Evidence]:
+def _from_pdf(reader: _Reader, leaked: bytes) -> list[Evidence] | None:
+    """원본과 쪽수와 쪽 크기가 같은 PDF에서 쪽마다 읽어 낸 칸. 구조가 다르면 None."""
     doc = open_plain_pdf(leaked, "유출본")
-    if doc.page_count != len(reference):
-        raise ExamShieldError(
-            f"유출본의 쪽수({doc.page_count})가 원본({len(reference)})과 다르다. "
-            "쪽을 그림으로 저장해서 한 쪽씩 넣는다."
-        )
+    if doc.page_count != len(reader.sizes):
+        return None
+    for page, (width, height) in zip(doc, reader.sizes, strict=True):
+        if abs(page.rect.width - width) > 0.5 or abs(page.rect.height - height) > 0.5:
+            return None
+    pages = _Pages(reader.original, reader.dpi)
     evidence = []
     for index, page in enumerate(doc):
-        image = render_gray(page, TRACE_DPI)
-        if image.shape != reference[index].shape:
-            raise ExamShieldError(f"{index + 1}쪽의 크기가 원본과 다르다.")
-        valid = np.ones(image.shape, dtype=bool)
-        found = _read_cells(image, valid, reference[index], sizes[index], cell_pt, index)
+        image = render_gray(page, reader.dpi)
+        reference = pages.full(index)
+        if image.shape != reference.shape:
+            return None
+        found = reader.read(image, np.ones(image.shape, dtype=bool), reference, index)
         if found is not None:
             evidence.append(found)
     return evidence
 
 
-def _from_image(
-    leaked: bytes, pages: _Pages, sizes: list[tuple[float, float]], cell_pt: int
-) -> Iterator[Evidence]:
-    """캡처가 맞춰지는 쪽마다 읽어 낸 칸. 캡처에 찍힌 쪽일 가능성이 높은 쪽부터 내놓는다."""
-    shot = decode_photo(leaked)
+def _from_image(reader: _Reader, shot: Gray, pages: "_Pages") -> Iterator[Evidence]:
+    """워터마크가 든 복사본의 화면 캡처. 캡처에 찍힌 쪽일 가능성이 높은 쪽부터 내놓는다."""
     known = _features(shot)
     for index in _likely_pages(shot, pages):
         page = pages.full(index)
@@ -323,13 +346,8 @@ def _from_image(
             (width, height),
             flags=cv2.INTER_LINEAR,
         )
-        found_cells = _read_cells(
-            np.asarray(warped, dtype=np.uint8),
-            np.asarray(covered) == 255,
-            page,
-            sizes[index],
-            cell_pt,
-            index,
+        found_cells = reader.read(
+            np.asarray(warped, dtype=np.uint8), np.asarray(covered) == 255, page, index
         )
         if found_cells is not None:
             yield found_cells
@@ -540,6 +558,23 @@ def format_trace(result: TraceResult) -> str:
         lines.append(f"수험번호     {result.examinee_id}")
     else:
         lines.append(f"결과         찾지 못했다. {result.reason}")
+    if result.parts:
+        lines.append("")
+        lines.append("유출본별 결과 (한 장씩 따로 봤을 때)")
+        for label, part in result.parts:
+            if part.found:
+                outcome = f"{part.examinee_id} (점수 {part.score:.2f})"
+            elif part.score is not None:
+                outcome = f"찾지 못함 (점수 {part.score:.2f})"
+            else:
+                outcome = "찾지 못함 (읽을 칸이 모자람)"
+            lines.append(f"  {label}: {outcome}, {part.cells}칸")
+        named = {part.examinee_id for _, part in result.parts if part.found}
+        if len(named) > 1:
+            lines.append(
+                "  주의: 유출본마다 다른 수험번호가 나왔다. 여러 응시자의 복사본이 섞여 있을 수 있다. "
+                "응시자별로 나눠서 다시 넣는다."
+            )
     return "\n".join(lines)
 
 
