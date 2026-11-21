@@ -155,6 +155,63 @@ def test_the_table_grows_as_copies_are_written(
     ]
 
 
+def test_resume_notices_a_changed_answer_key(workspace: dict[str, Path], tmp_path: Path) -> None:
+    """정답표가 바뀌면 미끼가 달라진다. 예전 정답표로 만든 복사본을 그대로 두면 섞인다."""
+    key = tmp_path / "key.csv"
+    key.write_text("1,2\n2,3\n3,1\n", encoding="utf-8")
+    assert copies(workspace, "--answer-key", str(key))[0] == 0
+    first = {path.name: path.read_bytes() for path in workspace["out"].glob("exam-*.pdf")}
+
+    same = copies(workspace, "--answer-key", str(key), "--resume")
+    # 빈 줄과 제목 줄만 다른 같은 정답표는 같은 것으로 본다.
+    key.write_text("쪽,정답\n1,2\n\n2,3\n3,1\n", encoding="utf-8")
+    reformatted = copies(workspace, "--answer-key", str(key), "--resume")
+    key.write_text("1,2\n2,4\n3,1\n", encoding="utf-8")
+    changed = copies(workspace, "--answer-key", str(key), "--resume")
+    after = {path.name: path.read_bytes() for path in workspace["out"].glob("exam-*.pdf")}
+    without = copies(workspace, "--resume")
+    fresh = workspace["out"].with_name("fresh")
+    assert (
+        copies(
+            {**workspace, "out": fresh, "map": tmp_path / "fresh.csv"}, "--answer-key", str(key)
+        )[0]
+        == 0
+    )
+
+    assert "6개는 그대로 두고 0개" in same[1] and "6개는 그대로 두고 0개" in reformatted[1]
+    assert changed[0] == 0 and "0개는 그대로 두고 6개" in changed[1]
+    assert "0개는 그대로 두고 6개" in without[1]
+    # 다시 만든 것은 새 정답표로 처음부터 만든 것과 같다.
+    assert after != first
+    assert after == {path.name: path.read_bytes() for path in fresh.glob("exam-*.pdf")}
+
+
+def test_the_answer_key_mark_in_the_job_record_does_not_give_the_answers_away(
+    workspace: dict[str, Path], tmp_path: Path
+) -> None:
+    import hashlib  # noqa: PLC0415
+    import json  # noqa: PLC0415
+
+    from examshield.protect.copies import answer_key_tag  # noqa: PLC0415
+    from examshield.protect.pipeline import read_answer_key  # noqa: PLC0415
+
+    key = tmp_path / "key.csv"
+    key.write_text("1,2\n2,3\n3,1\n", encoding="utf-8")
+    copies(workspace, "--answer-key", str(key))
+    record = json.loads((workspace["out"] / "exam-A1.job.json").read_text(encoding="utf-8"))
+    answers = read_answer_key(key)
+    plain = hashlib.sha256(key.read_bytes()).hexdigest()
+
+    # 시드를 열쇠로 쓴 값이다. 시드가 다르면 값이 다르고, 정답표만의 해시와도 다르다.
+    assert record["answer_key_tag"] == answer_key_tag(SEED, answers)
+    assert record["answer_key_tag"] != answer_key_tag(b"another-seed-0123456789", answers)
+    assert record["answer_key_tag"] not in plain and plain not in json.dumps(record)
+    assert answer_key_tag(SEED, None) is None
+    plain_run = workspace["out"].with_name("plain")
+    copies({**workspace, "out": plain_run, "map": tmp_path / "plain.csv"})
+    assert "answer_key_tag" not in (plain_run / "exam-A1.job.json").read_text(encoding="utf-8")
+
+
 def test_resume_is_refused_without_copies(sample_file: Path, tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,

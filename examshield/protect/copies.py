@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import hmac
 import io
 import json
 import multiprocessing
@@ -131,6 +132,21 @@ class Copy:
     check: CheckResult
 
 
+def answer_key_tag(seed: bytes, answer_key: AnswerKey | None) -> str | None:
+    """정답표가 같은 것인지 알아보는 표시. 작업 기록에 남겨 이어 하기에서 견준다.
+
+    정답표는 경우의 수가 적어서 그냥 해시하면 해시에서 정답을 거꾸로 찾아낼 수 있다. 그래서 시드를
+    열쇠로 쓴다. 시드가 없으면 이 값으로 정답을 알아낼 수 없다.
+    """
+    if answer_key is None:
+        return None
+    lines = "".join(
+        f"{entry.page},{'' if entry.question is None else entry.question},{entry.answer}\n"
+        for entry in answer_key
+    )
+    return hmac.new(seed, b"examshield-answer-key\x00" + lines.encode(), "sha256").hexdigest()[:32]
+
+
 def decoy_seed(key: bytes, input_sha256: str) -> bytes:
     """수험번호마다 다른 미끼 번호를 고르는 시드."""
     return hashlib.sha256(b"examshield-decoy\x00" + key + input_sha256.encode()).digest()
@@ -155,6 +171,7 @@ class _Shared:
     questions: tuple[tuple[tuple[int, int], ...], ...] | None
     input_sha256: str
     answer_key: bool
+    answer_key_tag: str | None = None
 
 
 def _one_copy(shared: _Shared, examinee_id: str, key: bytes, clear: bool = False) -> Copy:
@@ -221,6 +238,8 @@ def _one_copy(shared: _Shared, examinee_id: str, key: bytes, clear: bool = False
     record["check"] = shared.base_check
     record["watermark_check"] = check.as_dict()
     record["answer_key"] = shared.answer_key
+    if shared.answer_key_tag is not None:
+        record["answer_key_tag"] = shared.answer_key_tag
     record["decoy_answers"] = list(answers) if answers is not None else None
     record["decoy_items"] = decoy_items_record(items)
     record["decoys_per_examinee"] = personal
@@ -335,6 +354,7 @@ def protect_copies(
         questions=questions,
         input_sha256=sha256_hex(pdf),
         answer_key=answer_key is not None,
+        answer_key_tag=answer_key_tag(seed, answer_key),
     )
     workers = choose_jobs(jobs, len(examinee_ids))
     tasks = (
@@ -390,13 +410,13 @@ def reusable_rows(
     seed: bytes,
     pdf: bytes,
     profile: Profile,
-    answer_key: bool,
+    answer_key: AnswerKey | None,
     low_vision: frozenset[str] = frozenset(),
 ) -> dict[str, MapRow]:
     """끊긴 실행이 남긴 복사본 가운데 그대로 써도 되는 것. 수험번호 → 매핑표의 행.
 
     매핑표에 적혀 있고, 그 코드가 지금 시드에서 나온 것이며, 파일이 적힌 해시 그대로이고,
-    작업 기록의 원본과 프로파일이 지금 것과 같을 때만 쓴다. 하나라도 어긋나면 다시 만든다.
+    작업 기록의 원본, 프로파일, 정답표가 지금 것과 같을 때만 쓴다. 하나라도 어긋나면 다시 만든다.
     """
     try:
         rows = read_map(table)
@@ -405,6 +425,7 @@ def reusable_rows(
     kind, params = keyed_technique(profile)
     clear = clearzone.read_clear(params) if low_vision else 0
     wanted = set(examinee_ids)
+    tag = answer_key_tag(seed, answer_key)
     input_sha256 = sha256_hex(pdf)
     kept: dict[str, MapRow] = {}
     for row in rows:
@@ -428,7 +449,9 @@ def reusable_rows(
                 record["output_sha256"] == row.output_sha256
                 and record["input_sha256"] == input_sha256
                 and record["profile"]["sha256"] == profile.sha256
-                and bool(record.get("answer_key")) == answer_key
+                and bool(record.get("answer_key")) == (answer_key is not None)
+                # 표시가 없는 기록은 이 확인이 생기기 전에 만든 것이다. 정답표를 썼다면 다시 만든다.
+                and record.get("answer_key_tag") == tag
             )
         except (OSError, ValueError, KeyError, TypeError):
             continue

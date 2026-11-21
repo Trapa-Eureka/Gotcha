@@ -136,7 +136,7 @@ def make_copies(
     cell_pt = (dots if kind == DOTS else watermark).read_params(params)[0]
     blank = blank_cells(open_pdf_bytes(original), cell_pt)
     kept = (
-        reusable_rows(table, out, stem, ids, seed, original, profile, answers is not None, low)
+        reusable_rows(table, out, stem, ids, seed, original, profile, answers, low)
         if resume
         else {}
     )
