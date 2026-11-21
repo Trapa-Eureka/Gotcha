@@ -38,6 +38,9 @@ class Batch:
     table: Path
     kept: int
     made: int
+    # 저시력 수험생용으로 만든 복사본 수와, 그 복사본들에서 무늬를 넣을 수 있었던 칸의 비율(가장 낮은 값).
+    low_vision: int = 0
+    open_share: float | None = None
 
 
 def inside(path: Path, folder: Path) -> bool:
@@ -67,6 +70,7 @@ def make_copies(
     resume: bool = False,
     force: bool = False,
     ocr: Ocr | None = None,
+    low_vision: list[str] | None = None,
     keep_out: tuple[tuple[str, Path], ...] = (),
     on_start: Callable[[int, int], None] | None = None,
     on_step: Callable[[], None] | None = None,
@@ -78,6 +82,13 @@ def make_copies(
     on_start(이미 만든 수, 전체 수)는 만들기 직전에, on_step은 복사본 하나를 쓸 때마다 부른다.
     """
     keyed_technique(profile)
+    low = frozenset(low_vision or ())
+    unknown = sorted(low - set(ids))
+    if unknown:
+        raise ExamShieldError(
+            "저시력 수험번호 목록에 전체 수험번호 목록에 없는 번호가 있다: "
+            + ", ".join(unknown[:5])
+        )
     if seed_file is not None and not seed_file.is_file():
         raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
     seed = check_seed(seed_file.read_bytes() if seed_file is not None else None)
@@ -114,7 +125,7 @@ def make_copies(
         )
     original = load()
     kept = (
-        reusable_rows(table, out, stem, ids, seed, original, profile, answers is not None)
+        reusable_rows(table, out, stem, ids, seed, original, profile, answers is not None, low)
         if resume
         else {}
     )
@@ -125,8 +136,9 @@ def make_copies(
     if on_start is not None:
         on_start(len(kept), len(ids))
     made_rows = dict(kept)
+    shares: list[float] = []
     if todo:
-        base_check, made = protect_copies(original, profile, seed, todo, ocr, answers, jobs)
+        base_check, made = protect_copies(original, profile, seed, todo, ocr, answers, jobs, low)
         if not base_check.passed:
             raise CopiesFailed("검사 실패. 복사본을 쓰지 않았다.", format_result(base_check))
         for copy in made:
@@ -139,8 +151,39 @@ def make_copies(
             row = map_row(copy, seed, written.name)
             append_map(table, row)
             made_rows[copy.examinee_id] = row
+            share = copy.protected.record["techniques"][-1]["stats"].get("open_share")
+            if share is not None:
+                shares.append(float(share))
             if on_step is not None:
                 on_step()
     rows = [made_rows[examinee] for examinee in ids]
     write_map(table, rows)
-    return Batch(rows=rows, table=table, kept=len(kept), made=len(todo))
+    return Batch(
+        rows=rows,
+        table=table,
+        kept=len(kept),
+        made=len(todo),
+        low_vision=sum(1 for row in rows if row.clear_pt),
+        open_share=min(shares) if shares else None,
+    )
+
+
+# 무늬를 넣을 수 있는 칸이 이보다 적으면 그림 한 장으로는 추적하기 어렵다고 알린다.
+THIN_OPEN_SHARE = 0.2
+
+
+def low_vision_lines(batch: Batch) -> list[str]:
+    """저시력 수험생용 복사본에 대해 사용자에게 알릴 말. 명령줄과 웹 화면이 함께 쓴다."""
+    if not batch.low_vision:
+        return []
+    lines = [
+        f"저시력 수험생용 복사본 {batch.low_vision}개: 글자와 그림 둘레를 비우고 여백에만 무늬를 넣었다. "
+        "화면의 일부만 잘라 낸 그림으로는 추적하기 어렵다."
+    ]
+    if batch.open_share is not None:
+        lines.append(f"  무늬를 넣은 자리는 쪽 넓이의 {batch.open_share:.0%}다.")
+        if batch.open_share < THIN_OPEN_SHARE:
+            lines.append(
+                "  주의: 여백이 적은 문서다. 쪽 전체가 나온 그림이나 PDF가 아니면 추적하지 못할 수 있다."
+            )
+    return lines

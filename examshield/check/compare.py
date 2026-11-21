@@ -7,6 +7,7 @@ import numpy as np
 import pymupdf
 from numpy.typing import NDArray
 
+from examshield.clearzone import BACKGROUND_MIN, CLEAR_RANGE, open_cells
 from examshield.errors import ExamShieldError
 from examshield.pdfio import (
     normalize_text,
@@ -29,6 +30,8 @@ DOTS_INK_RANGE = (64, 255)
 # 무늬는 칸의 절반쯤을 채운다. 절반에서 이만큼, 또는 우연으로 보기 어려울 만큼 벗어나면 받지 않는다.
 FILL_MARGIN = 0.15
 FILL_SIGMAS = 6
+# 저시력 수험생용 복사본에서 바탕으로 보는 밝기를 얼마나 느슨하게 잡는지.
+CLEAR_SLACK = 16
 SIZE_TOLERANCE = 0.01
 OCR_TOLERANCE = 0.02
 TEXT_PRESERVED = "preserved"
@@ -51,8 +54,17 @@ class Expectation:
     overlay_cell_pt: int | None = None
     dots_cell_pt: int | None = None
     dots_ink: int | None = None
+    # 저시력 수험생용 복사본이면 글자와 그림 둘레를 비운 너비(pt). 그 안에는 무늬가 없어야 한다.
+    clear_pt: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
+        record = self._record()
+        # 값이 있을 때만 적는다. 그래야 예전 작업 기록과 글자까지 같다.
+        if self.clear_pt is not None:
+            record["clear_pt"] = self.clear_pt
+        return record
+
+    def _record(self) -> dict[str, Any]:
         return {
             "text": self.text,
             "flattened_dpi": self.flattened_dpi,
@@ -74,6 +86,12 @@ class Expectation:
         tolerance = int(data.get("pixel_tolerance", PIXEL_TOLERANCE))
         cell = data.get("overlay_cell_pt")
         dots_cell, dots_ink = data.get("dots_cell_pt"), data.get("dots_ink")
+        clear = data.get("clear_pt")
+        if clear is not None and (
+            overlay != 1 or not CLEAR_RANGE[0] <= int(clear) <= CLEAR_RANGE[1]
+        ):
+            raise ExamShieldError("작업 기록의 clear_pt 값이 범위를 벗어났다.")
+        clear = int(clear) if clear is not None else None
         if dots_cell is not None or dots_ink is not None:
             if (
                 dots_cell is None
@@ -92,6 +110,7 @@ class Expectation:
                 overlay_images=1,
                 dots_cell_pt=int(dots_cell),
                 dots_ink=int(dots_ink),
+                clear_pt=clear,
             )
         relaxed = overlay == 1 or tolerance != PIXEL_TOLERANCE
         if (
@@ -107,6 +126,7 @@ class Expectation:
             text=text,
             flattened_dpi=int(dpi) if dpi is not None else None,
             decoys=tuple(str(entry) for entry in data.get("decoys") or ()),
+            clear_pt=clear,
         )
 
 
@@ -198,13 +218,13 @@ def compare(
             result.differences.append(f"{number}쪽: 주석의 개수가 다르다")
         tolerance = expect.pixel_tolerance
         if expect.dots_cell_pt is not None:
-            problem = _lift_dots(target, after, expect)
+            problem = _lift_dots(target, after, expect, before)
             if problem:
                 result.differences.append(f"{number}쪽: {problem}")
                 continue
             after = target.reload_page(after)
         elif expect.overlay_images:
-            problem = _lift_watermark(target, after, expect)
+            problem = _lift_watermark(target, after, expect, before)
             if problem:
                 result.differences.append(f"{number}쪽: {problem}")
                 continue
@@ -266,7 +286,7 @@ def _same_layer_count(source: Any, target: Any) -> bool:
     return len(saved.get_ocgs()) == wanted
 
 
-def _lift_dots(doc: Any, page: Any, expect: Expectation) -> str | None:
+def _lift_dots(doc: Any, page: Any, expect: Expectation, before: Any) -> str | None:
     """도트 무늬 그림이 약속한 모양인지 확인하고 쪽에서 걷어 낸다. 문제가 있으면 그 내용을 돌려준다.
 
     약속한 모양: 쪽 전체를 덮는 그림 한 장, 점은 칸 가운데에만, 진하기는 기록된 값 하나뿐.
@@ -285,10 +305,10 @@ def _lift_dots(doc: Any, page: Any, expect: Expectation) -> str | None:
             return "도트 무늬에 칸 가운데가 아닌 점이나 다른 진하기의 점이 있다"
         return None
 
-    return _lift_overlay(doc, page, cell, step, "도트 무늬", problem_in)
+    return _lift_overlay(doc, page, cell, step, "도트 무늬", problem_in, before, expect.clear_pt)
 
 
-def _lift_watermark(doc: Any, page: Any, expect: Expectation) -> str | None:
+def _lift_watermark(doc: Any, page: Any, expect: Expectation, before: Any) -> str | None:
     """워터마크 그림이 약속한 모양인지 확인하고 쪽에서 걷어 낸다. 문제가 있으면 그 내용을 돌려준다.
 
     약속한 모양: 쪽 전체를 덮는 그림 한 장, 화소 하나가 칸 하나, 칸은 '그대로'이거나 기록된 세기 하나뿐.
@@ -306,7 +326,7 @@ def _lift_watermark(doc: Any, page: Any, expect: Expectation) -> str | None:
             return "워터마크에 기록된 세기와 다른 칸이 있다. 다른 내용이 옅게 들어갔을 수 있다"
         return None
 
-    return _lift_overlay(doc, page, cell, 1, "워터마크", problem_in)
+    return _lift_overlay(doc, page, cell, 1, "워터마크", problem_in, before, expect.clear_pt)
 
 
 def _lift_overlay(
@@ -316,6 +336,8 @@ def _lift_overlay(
     pixels_per_cell: int,
     label: str,
     problem_in: Callable[[NDArray[np.uint8]], str | None],
+    before: Any,
+    clear_pt: int | None,
 ) -> str | None:
     # 쪽들이 그림 자원을 같이 쓰는 문서에서는 그림 정보의 번호가 틀릴 수 있다.
     # 그래서 쪽의 마지막 내용 줄기가 "그림 하나를 쪽 전체에 그린다"인지 직접 읽는다.
@@ -355,9 +377,19 @@ def _lift_overlay(
         return problem
     # 무늬는 칸의 절반쯤을 채운다. 크게 벗어나면 무늬가 아니라 칸으로 그린 그림일 수 있다.
     # 칸이 적은 작은 쪽은 우연히도 많이 벗어나므로 그만큼 넓게 본다.
-    count = rows * cols
-    filled = float(np.count_nonzero(alpha)) / count
-    if abs(filled - 0.5) > max(FILL_MARGIN, FILL_SIGMAS * 0.5 / count**0.5):
+    marks = alpha.reshape(rows, pixels_per_cell, cols, pixels_per_cell).any(axis=(1, 3))
+    usable = np.ones((rows, cols), dtype=bool)
+    if clear_pt is not None:
+        # 저시력 수험생용: 글자와 그림 둘레에는 무늬가 없어야 한다. 비울 칸은 무늬를 넣기 전의 쪽에서
+        # 구한다. 원본과 복사본의 렌더링이 한두 단계 다를 수 있어, 어기는지는 한 칸 좁혀서 본다.
+        near = max(clear_pt - cell, 0)
+        loose = open_cells(before, cell, near, rows, cols, BACKGROUND_MIN - CLEAR_SLACK)
+        if np.any(marks & ~loose):
+            return f"{label}가 글자나 그림 둘레에도 들어가 있다. 저시력 수험생용 복사본이 아니다"
+        usable = open_cells(before, cell, clear_pt, rows, cols)
+    count = int(usable.sum())
+    filled = float(np.count_nonzero(marks & usable)) / count if count else 0.5
+    if count and abs(filled - 0.5) > max(FILL_MARGIN, FILL_SIGMAS * 0.5 / count**0.5):
         return f"{label}의 채워진 칸 수가 무작위 무늬로 보기 어렵다"
     if not _forget_image(doc, page, drawn.group("name").decode("ascii")):
         return f"{label} 그림을 쪽의 자원에서 빼지 못했다"

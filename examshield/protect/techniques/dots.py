@@ -12,6 +12,7 @@ import numpy as np
 import pymupdf
 from numpy.typing import NDArray
 
+from examshield import clearzone
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, own_contents, save_deterministic
 from examshield.protect.techniques import watermark
@@ -67,9 +68,12 @@ def alpha_plane(bits: NDArray[np.bool_], cell: int, ink: int) -> NDArray[np.uint
 def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
     cell, ink = read_params(params)
     key = pattern_key(context)
+    clear = clearzone.read_clear(params) if context.clear_zone else None
     doc = open_pdf_bytes(pdf)
     marked = 0
     total = 0
+    opened = 0
+    cells = 0
     for index, page in enumerate(doc):
         if page.rotation:
             raise ExamShieldError(
@@ -82,6 +86,11 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
             )
         rows, cols = watermark.grid_shape(page.rect.width, page.rect.height, cell)
         bits = watermark.pattern(key, index, rows, cols)
+        if clear is not None:
+            allowed = clearzone.open_cells(page, cell, clear, rows, cols)
+            bits = bits & allowed
+            opened += int(allowed.sum())
+            cells += rows * cols
         alpha = alpha_plane(bits, cell, ink)
         samples = np.zeros((*alpha.shape, 2), dtype=np.uint8)
         samples[..., 1] = alpha
@@ -94,15 +103,19 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         page.insert_image(area, pixmap=pixmap, overlay=True)
         marked += int(bits.sum())
         total += alpha.size
+    stats: dict[str, Any] = {
+        "cell_pt": cell,
+        "ink": ink,
+        "dot_pt": round(1 / PX_PER_PT, 3),
+        "coverage": round(marked / total, 6) if total else 0.0,
+        "pages": doc.page_count,
+    }
+    if clear is not None:
+        stats.update(clearzone.stats(clear, opened, cells))
     return Outcome(
         pdf=save_deterministic(doc),
-        stats={
-            "cell_pt": cell,
-            "ink": ink,
-            "dot_pt": round(1 / PX_PER_PT, 3),
-            "coverage": round(marked / total, 6) if total else 0.0,
-            "pages": doc.page_count,
-        },
+        stats=stats,
         overlay_images=1,
         dots={"cell_pt": cell, "ink": ink},
+        clear_pt=clear,
     )

@@ -12,7 +12,9 @@ from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from examshield import clearzone
 from examshield.check.compare import CheckResult, Expectation, Ocr, compare
+from examshield.clearzone import CLEAR_RANGE
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile
@@ -33,7 +35,7 @@ from examshield.protect.techniques.base import Context, Outcome
 WATERMARK = "watermark"
 DECOY = "decoy"
 DOTS = "dots"
-MAP_COLUMNS = ("examinee_id", "code", "file", "output_sha256", "cell_pt", "kind")
+MAP_COLUMNS = ("examinee_id", "code", "file", "output_sha256", "cell_pt", "kind", "clear_pt")
 CELL_RANGES = {WATERMARK: watermark.CELL_RANGE, DOTS: dots.CELL_RANGE}
 HEADER_WORDS = {"수험번호", "examinee_id", "examinee", "id", "번호", "학번"}
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
@@ -52,6 +54,19 @@ class MapRow:
     cell_pt: int
     # 무늬의 종류. watermark는 화면용 옅은 바탕 무늬, dots는 인쇄용 점 무늬다.
     kind: str = WATERMARK
+    # 저시력 수험생용 복사본이면 글자와 그림 둘레를 비운 너비(pt). 보통 복사본은 0이다.
+    clear_pt: int = 0
+
+    def cells(self) -> list[object]:
+        return [
+            self.examinee_id,
+            self.code,
+            self.file,
+            self.output_sha256,
+            self.cell_pt,
+            self.kind,
+            self.clear_pt,
+        ]
 
 
 def read_examinee_ids(path: Path) -> list[str]:
@@ -142,7 +157,7 @@ class _Shared:
     answer_key: bool
 
 
-def _one_copy(shared: _Shared, examinee_id: str, key: bytes) -> Copy:
+def _one_copy(shared: _Shared, examinee_id: str, key: bytes, clear: bool = False) -> Copy:
     base = shared.base
     personal = shared.decoy_params is not None
     current = base.pdf
@@ -160,7 +175,9 @@ def _one_copy(shared: _Shared, examinee_id: str, key: bytes) -> Copy:
         )
         current = lured.pdf
     outcome = TECHNIQUES[shared.kind](
-        current, shared.params, Context(seed=b"", original_texts=(), watermark_key=key)
+        current,
+        shared.params,
+        Context(seed=b"", original_texts=(), watermark_key=key, clear_zone=clear),
     )
     tolerance = outcome.pixel_tolerance or base.expectation.pixel_tolerance
     texts = lured.decoy_texts if lured is not None and lured.decoy_texts else ()
@@ -171,6 +188,7 @@ def _one_copy(shared: _Shared, examinee_id: str, key: bytes) -> Copy:
         overlay_cell_pt=None if outcome.dots else int(outcome.stats["cell_pt"]),
         dots_cell_pt=outcome.dots["cell_pt"] if outcome.dots else None,
         dots_ink=outcome.dots["ink"] if outcome.dots else None,
+        clear_pt=outcome.clear_pt,
     )
     # 수험번호와 무관한 단계까지 만든 문서와 비교한다. 달라도 되는 것은 기록된 미끼 문구와
     # 덧씌운 무늬 한 장뿐이다.
@@ -183,6 +201,7 @@ def _one_copy(shared: _Shared, examinee_id: str, key: bytes) -> Copy:
         overlay_cell_pt=overlay.overlay_cell_pt,
         dots_cell_pt=overlay.dots_cell_pt,
         dots_ink=overlay.dots_ink,
+        clear_pt=overlay.clear_pt,
     )
     answers = lured.decoy_answers if lured is not None else base.decoy_answers
     items = lured.decoy_items if lured is not None else base.decoy_items
@@ -226,7 +245,7 @@ def _start_worker(shared: _Shared) -> None:
     _worker_shared = shared
 
 
-def _work(task: tuple[str, bytes]) -> Copy:
+def _work(task: tuple[str, bytes, bool]) -> Copy:
     if _worker_shared is None:
         raise RuntimeError("작업 프로세스가 준비되지 않았다.")
     return _one_copy(_worker_shared, *task)
@@ -244,7 +263,9 @@ def choose_jobs(requested: int | None, copies: int) -> int:
     return max(1, min(os.cpu_count() or 1, MAX_AUTO_JOBS, copies // COPIES_PER_PROCESS))
 
 
-def _in_processes(shared: _Shared, tasks: Iterator[tuple[str, bytes]], jobs: int) -> Iterator[Copy]:
+def _in_processes(
+    shared: _Shared, tasks: Iterator[tuple[str, bytes, bool]], jobs: int
+) -> Iterator[Copy]:
     """수험번호 목록의 순서대로 돌려준다. 받는 쪽이 느리면 더 만들지 않고 기다린다."""
     # fork는 macOS에서 안전하지 않고, 단일 실행 파일에서도 spawn만 쓸 수 있다.
     pool = ProcessPoolExecutor(
@@ -278,6 +299,7 @@ def protect_copies(
     ocr: Ocr | None = None,
     answer_key: AnswerKey | None = None,
     jobs: int | None = 1,
+    low_vision: frozenset[str] = frozenset(),
 ) -> tuple[CheckResult, Iterator[Copy]]:
     """수험번호와 무관한 단계는 한 번만 만들고 검사한다. 그 위에 수험번호별 미끼와 무늬를 얹는다.
 
@@ -286,8 +308,12 @@ def protect_copies(
 
     jobs가 2 이상이면 수험번호별 단계를 여러 프로세스로 나눠 한다. None이면 알아서 고른다.
     어느 쪽이든 나오는 복사본은 바이트까지 같다.
+
+    low_vision에 든 수험번호의 복사본은 글자와 그림 둘레를 비우고 빈 바탕에만 무늬를 넣는다.
     """
     kind, params = keyed_technique(profile)
+    if low_vision:
+        clearzone.read_clear(params)
     plain = [entry for entry in profile.techniques if entry.id not in KEYED]
     personal = bool(plain) and plain[-1].id == DECOY
     shared_steps = plain[:-1] if personal else plain
@@ -311,14 +337,17 @@ def protect_copies(
         answer_key=answer_key is not None,
     )
     workers = choose_jobs(jobs, len(examinee_ids))
-    tasks = ((examinee, watermark.derive_key(seed, examinee)) for examinee in examinee_ids)
+    tasks = (
+        (examinee, watermark.derive_key(seed, examinee), examinee in low_vision)
+        for examinee in examinee_ids
+    )
 
     def make() -> Iterator[Copy]:
         if workers > 1 and base_check.passed:
             yield from _in_processes(shared, tasks, workers)
             return
-        for examinee_id, key in tasks:
-            yield _one_copy(shared, examinee_id, key)
+        for examinee_id, key, clear in tasks:
+            yield _one_copy(shared, examinee_id, key, clear)
 
     return base_check, make()
 
@@ -334,6 +363,7 @@ def map_row(copy: Copy, seed: bytes, file_name: str) -> MapRow:
         file=file_name,
         output_sha256=copy.protected.record["output_sha256"],
         cell_pt=int(stats["cell_pt"]),
+        clear_pt=int(stats.get("clear_pt") or 0),
     )
 
 
@@ -343,17 +373,13 @@ def write_map(path: Path, rows: list[MapRow]) -> None:
         writer = csv.writer(handle)
         writer.writerow(MAP_COLUMNS)
         for row in rows:
-            writer.writerow(
-                [row.examinee_id, row.code, row.file, row.output_sha256, row.cell_pt, row.kind]
-            )
+            writer.writerow(row.cells())
 
 
 def append_map(path: Path, row: MapRow) -> None:
     """만든 복사본을 하나씩 매핑표에 보탠다. 중간에 끊겨도 그때까지 만든 것은 추적할 수 있다."""
     with path.open("a", encoding="utf-8", newline="") as handle:
-        csv.writer(handle).writerow(
-            [row.examinee_id, row.code, row.file, row.output_sha256, row.cell_pt, row.kind]
-        )
+        csv.writer(handle).writerow(row.cells())
 
 
 def reusable_rows(
@@ -365,6 +391,7 @@ def reusable_rows(
     pdf: bytes,
     profile: Profile,
     answer_key: bool,
+    low_vision: frozenset[str] = frozenset(),
 ) -> dict[str, MapRow]:
     """끊긴 실행이 남긴 복사본 가운데 그대로 써도 되는 것. 수험번호 → 매핑표의 행.
 
@@ -375,7 +402,8 @@ def reusable_rows(
         rows = read_map(table)
     except ExamShieldError:
         return {}
-    kind, _ = keyed_technique(profile)
+    kind, params = keyed_technique(profile)
+    clear = clearzone.read_clear(params) if low_vision else 0
     wanted = set(examinee_ids)
     input_sha256 = sha256_hex(pdf)
     kept: dict[str, MapRow] = {}
@@ -384,6 +412,9 @@ def reusable_rows(
         if examinee not in wanted or row.kind != kind:
             continue
         if row.file != f"{stem}-{examinee}.pdf":
+            continue
+        # 저시력 수험생용으로 만든 것과 보통 것은 서로 대신 쓰지 못한다.
+        if row.clear_pt != (clear if examinee in low_vision else 0):
             continue
         if row.code != watermark.code_of(watermark.derive_key(seed, examinee)):
             continue
@@ -418,6 +449,8 @@ def read_map(path: Path) -> list[MapRow]:
                     cell_pt=int(entry["cell_pt"]),
                     # 이 열이 없는 매핑표는 도트 무늬가 생기기 전에 만든 것이다.
                     kind=entry.get("kind") or WATERMARK,
+                    # 이 열이 없는 매핑표는 저시력 수험생용 복사본이 생기기 전에 만든 것이다.
+                    clear_pt=int(entry.get("clear_pt") or 0),
                 )
                 for entry in csv.DictReader(handle)
             ]
@@ -427,6 +460,8 @@ def read_map(path: Path) -> list[MapRow]:
         raise ExamShieldError(f"매핑표가 비어 있다: {path}")
     if any(row.kind not in CELL_RANGES for row in rows):
         raise ExamShieldError(f"매핑표의 kind 값을 모른다: {path}")
+    if any(row.clear_pt and not CLEAR_RANGE[0] <= row.clear_pt <= CLEAR_RANGE[1] for row in rows):
+        raise ExamShieldError(f"매핑표의 clear_pt 값이 범위를 벗어났다: {path}")
     for row in rows:
         low, high = CELL_RANGES[row.kind]
         if not low <= row.cell_pt <= high:

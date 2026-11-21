@@ -7,6 +7,7 @@ import numpy as np
 import pymupdf
 from numpy.typing import NDArray
 
+from examshield import clearzone
 from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, own_contents, save_deterministic
 from examshield.protect.techniques.base import Context, Outcome
@@ -62,10 +63,18 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
             "이 프로파일에는 수험번호별 워터마크가 있다. --copies로 수험번호 목록을, "
             "--seed-file로 시드 파일을 준다."
         )
+    clear = clearzone.read_clear(params) if context.clear_zone else None
     doc = open_pdf_bytes(pdf)
+    opened = 0
+    total = 0
     for index, page in enumerate(doc):
         rows, cols = grid_shape(page.rect.width, page.rect.height, cell)
         bits = pattern(context.watermark_key, index, rows, cols)
+        if clear is not None:
+            allowed = clearzone.open_cells(page, cell, clear, rows, cols)
+            bits = bits & allowed
+            opened += int(allowed.sum())
+            total += rows * cols
         # 검은색에 아주 옅은 투명도를 준 그림을 쪽 위에 덮는다. 바탕은 조금 어두워지고 검은 글자는 그대로다.
         samples = np.zeros((rows, cols, 2), dtype=np.uint8)
         samples[..., 1] = np.where(bits, strength, 0)
@@ -74,9 +83,13 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         area = pymupdf.Rect(corner.x, corner.y, corner.x + cols * cell, corner.y + rows * cell)
         own_contents(doc, page)
         page.insert_image(area, pixmap=pixmap, overlay=True)
+    stats: dict[str, Any] = {"cell_pt": cell, "strength": strength, "pages": doc.page_count}
+    if clear is not None:
+        stats.update(clearzone.stats(clear, opened, total))
     return Outcome(
         pdf=save_deterministic(doc),
-        stats={"cell_pt": cell, "strength": strength, "pages": doc.page_count},
+        stats=stats,
         overlay_images=1,
         pixel_tolerance=strength + RENDER_SLACK,
+        clear_pt=clear,
     )

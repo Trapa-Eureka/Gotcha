@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from typer.testing import CliRunner
 
 from examshield.cli import app
 from examshield.pdfio import open_pdf_bytes, save_deterministic
+from examshield.protect import batch
 from examshield.ui.server import HOST, TOKEN_HEADER, Service, make_server, safe_name
 from examshield.verify.capture_sim import encode_png
 
@@ -45,6 +47,33 @@ class Client:
 
     def post(self, path: str, payload: Any, **extra: str) -> tuple[int, dict[str, Any]]:
         headers = {"Content-Type": "application/json", TOKEN_HEADER: self.token, **extra}
+        status, _, body = self.send("POST", path, payload, headers)
+        answer = json.loads(body)
+        if status != 202:
+            return status, answer
+        # 오래 걸리는 일은 작업 번호만 돌아온다. 끝날 때까지 물어서 예전처럼 결과를 돌려준다.
+        final = self.wait(answer["job"])
+        if final["state"] == "failed":
+            return 400, {"error": final["error"]}
+        return 200, final["result"]
+
+    def job(self, job_id: str = "") -> tuple[int, dict[str, Any]]:
+        query = f"/api/job?t={self.token}" + (f"&id={job_id}" if job_id else "")
+        status, _, body = self.send("GET", query)
+        return status, json.loads(body)
+
+    def wait(self, job_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            status, state = self.job(job_id)
+            assert status == 200, state
+            if state["state"] != "running":
+                return state
+            time.sleep(0.05)
+        raise AssertionError("작업이 끝나지 않았다.")
+
+    def start(self, path: str, payload: Any) -> tuple[int, dict[str, Any]]:
+        headers = {"Content-Type": "application/json", TOKEN_HEADER: self.token}
         status, _, body = self.send("POST", path, payload, headers)
         return status, json.loads(body)
 
@@ -356,12 +385,15 @@ def test_the_page_drops_the_token_from_the_address_bar() -> None:
     assert 'history.replaceState(null, "", "/")' in page
 
 
+SEED = b"0123456789abcdef-institution-seed"
+
+
 @pytest.fixture
 def desk(tmp_path: Path) -> Iterator[tuple[Client, Path]]:
     """웹 화면을 띄운 폴더가 정해진 서버. 시드 파일이 secrets/에 있다."""
     base = tmp_path / "desk"
     (base / "secrets").mkdir(parents=True)
-    (base / "secrets" / "exam.seed").write_bytes(b"0123456789abcdef-institution-seed")
+    (base / "secrets" / "exam.seed").write_bytes(SEED)
     server, address = make_server(
         tmp_path / "work",
         reports=tmp_path / "reports",
@@ -502,14 +534,92 @@ def test_trace_refuses_missing_tables_and_too_many_or_no_files(
     assert empty[0] == 400 and crowd[0] == 400 and odd[0] == 400
 
 
-def test_progress_is_answered_only_with_the_token(desk: tuple[Client, Path]) -> None:
+def test_a_long_job_is_started_then_asked_about_then_read(
+    desk: tuple[Client, Path], sample_pdf: bytes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """복사본 만들기는 바로 작업 번호를 돌려주고, 진행과 결과는 따로 물어 본다."""
+    client, base = desk
+    gate = threading.Event()
+    reached = threading.Event()
+    real = batch.write_outputs
+
+    def held(protected: Any, out: Path, stem: str) -> Path:
+        if stem.endswith("A2"):
+            reached.set()
+            assert gate.wait(60)
+        return real(protected, out, stem)
+
+    monkeypatch.setattr(batch, "write_outputs", held)
+
+    status, started = client.start("/api/copies", copies_request(sample_pdf))
+    assert reached.wait(60)
+    _, middle = client.job(started["job"])
+    busy = client.start("/api/copies", copies_request(sample_pdf, out_dir="out/second"))
+    latest = client.job()[1]
+    gate.set()
+    final = client.wait(started["job"])
+    kept = client.job()[1]
+
+    assert status == 202 and set(started) == {"job"}
+    assert middle["state"] == "running" and (middle["done"], middle["total"]) == (1, 3)
+    assert middle["result"] is None and middle["kind"] == "copies"
+    assert busy[0] == 409 and "진행 중" in busy[1]["error"]
+    assert not (base / "out" / "second").exists()
+    assert latest["id"] == started["job"]
+    assert final["state"] == "done" and final["result"]["passed"]
+    assert "복사본 3개" in final["result"]["summary"]
+    # 결과는 다음 작업을 시작할 때까지 남는다. 화면을 새로 열어도 볼 수 있다.
+    assert kept == final
+
+
+def test_a_job_that_fails_says_why_and_frees_the_desk(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
+    client, _ = desk
+    client.post("/api/copies", copies_request(sample_pdf))
+
+    status, started = client.start("/api/copies", copies_request(sample_pdf))
+    failed = client.wait(started["job"])
+    again = client.post("/api/copies", copies_request(sample_pdf, resume=True))
+
+    assert status == 202
+    assert failed["state"] == "failed" and "이미 같은 이름" in failed["error"]
+    assert failed["result"] is None
+    assert again[0] == 200 and again[1]["passed"]
+
+
+def test_jobs_are_answered_only_with_the_token_and_the_right_number(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
     client, _ = desk
 
-    status, _, body = client.send("GET", f"/api/progress?t={client.token}")
-    refused, _, _ = client.send("GET", "/api/progress")
+    idle = client.job()
+    refused, _, _ = client.send("GET", "/api/job")
+    client.post("/api/copies", copies_request(sample_pdf))
+    wrong = client.job("no-such-job")
+    gone, _, _ = client.send("GET", f"/api/progress?t={client.token}")
 
-    assert status == 200 and json.loads(body) == {"label": "", "done": 0, "total": 0}
+    assert idle == (200, {"state": "none"})
     assert refused == 403
+    assert wrong[0] == 404
+    assert gone == 404
+
+
+def test_a_job_result_never_carries_the_seed_or_the_table(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
+    client, base = desk
+    client.post("/api/copies", copies_request(sample_pdf))
+
+    _, _, body = client.send("GET", f"/api/job?t={client.token}")
+    codes = [
+        line.split(",")[1]
+        for line in (base / "secrets" / "exam.map.csv").read_text().splitlines()[1:]
+    ]
+
+    assert SEED not in body and base64.b64encode(SEED) not in body
+    assert all(code.encode() not in body for code in codes)
+    assert b"%PDF" not in body and base64.b64encode(sample_pdf)[:40] not in body
 
 
 def test_the_page_offers_copies_and_trace_and_tells_where_paths_start(
@@ -524,3 +634,22 @@ def test_the_page_offers_copies_and_trace_and_tells_where_paths_start(
     assert "수험번호별 복사본" in text and "유출본 추적" in text
     assert 'id="copies-seed" type="text"' in text and 'type="file" id="copies-seed"' not in text
     assert json.loads(listed)["base_dir"] == str(base.resolve())
+
+
+def test_low_vision_numbers_get_copies_marked_only_in_the_margins(
+    desk: tuple[Client, Path], sample_pdf: bytes
+) -> None:
+    client, base = desk
+
+    status, made = client.post("/api/copies", copies_request(sample_pdf, low_vision="A2\n"))
+    table = (base / "secrets" / "exam.map.csv").read_text(encoding="utf-8").splitlines()
+    unknown = client.post(
+        "/api/copies", copies_request(sample_pdf, low_vision="Z9\n", out_dir="out/other")
+    )
+    _, _, page = client.send("GET", f"/?t={client.token}")
+
+    assert status == 200 and made["passed"], made
+    assert "저시력 수험생용 복사본 1개" in made["summary"]
+    assert [line.rsplit(",", 1)[1] for line in table[1:]] == ["0", "18", "0"]
+    assert unknown[0] == 400 and "Z9" in unknown[1]["error"]
+    assert 'id="copies-low"' in page.decode("utf-8")

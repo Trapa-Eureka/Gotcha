@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from examshield.clearzone import open_cells
 from examshield.errors import ExamShieldError
 from examshield.pdfio import render_gray
 from examshield.protect.copies import DOTS, MapRow
@@ -52,6 +54,8 @@ class Evidence:
     cols: int
     cells: NDArray[np.intp]
     values: NDArray[np.float64]
+    # 칸마다, 저시력 수험생용 복사본에서도 무늬가 들어가는 칸인지. 그런 복사본이 매핑표에 있을 때만 구한다.
+    open: NDArray[np.bool_] | None = None
 
 
 @dataclass(frozen=True)
@@ -103,19 +107,32 @@ class _Reader:
     ids: list[str]
     keys: list[bytes]
     dots: bool
+    # 저시력 수험생용 복사본이 비운 너비(pt)와, 수험번호마다 그런 복사본인지. 없으면 0과 빈 목록.
+    clear_pt: int = 0
+    low: tuple[bool, ...] = ()
 
     @property
     def dpi(self) -> int:
         return DOTS_DPI if self.dots else TRACE_DPI
 
+    @cached_property
+    def _document(self) -> Any:
+        return open_plain_pdf(self.original, "원본")
+
     def read(
         self, image: Gray, valid: NDArray[np.bool_], reference: Gray, index: int
     ) -> Evidence | None:
         reader = _read_dots if self.dots else _read_cells
-        return reader(image, valid, reference, self.sizes[index], self.cell_pt, index)
+        found = reader(image, valid, reference, self.sizes[index], self.cell_pt, index)
+        if found is None or not self.clear_pt:
+            return found
+        allowed = open_cells(
+            self._document[index], self.cell_pt, self.clear_pt, found.rows, found.cols
+        )
+        return replace(found, open=allowed.ravel()[found.cells])
 
     def decide(self, evidence: list[Evidence], method: str) -> TraceResult:
-        return _decide(evidence, self.ids, self.keys, method)
+        return _decide(evidence, self.ids, self.keys, method, self.low)
 
 
 def trace(
@@ -153,6 +170,8 @@ def trace_many(
         ids=[row.examinee_id for row in rows],
         keys=keys,
         dots=rows[0].kind == DOTS,
+        clear_pt=max(row.clear_pt for row in rows),
+        low=tuple(bool(row.clear_pt) for row in rows),
     )
     parts: list[tuple[str, TraceResult, list[Evidence]]] = []
     for label, data, suffix in files:
@@ -218,6 +237,8 @@ def _keys(rows: list[MapRow], seed: bytes) -> list[bytes]:
         raise ExamShieldError("시드 파일이 이 매핑표를 만들 때 쓴 것과 다르다.")
     if len({(row.cell_pt, row.kind) for row in rows}) != 1:
         raise ExamShieldError("매핑표에 무늬 종류나 칸 크기가 다른 행이 섞여 있다.")
+    if len({row.clear_pt for row in rows if row.clear_pt}) > 1:
+        raise ExamShieldError("매핑표에 clear_pt 값이 다른 저시력 수험생용 행이 섞여 있다.")
     if rows[0].kind == DOTS:
         return [dots.examinee_key(key) for key in keys]
     return keys
@@ -477,7 +498,11 @@ def _read_cells(
 
 
 def _decide(
-    evidence: list[Evidence], ids: list[str], keys: list[bytes], method: str
+    evidence: list[Evidence],
+    ids: list[str],
+    keys: list[bytes],
+    method: str,
+    low: tuple[bool, ...] = (),
 ) -> TraceResult:
     total = sum(len(entry.cells) for entry in evidence)
     pages = tuple(entry.page_index + 1 for entry in evidence)
@@ -505,6 +530,17 @@ def _decide(
             pages,
             "원본과 차이가 없다. 워터마크가 없는 문서다.",
         )
+    # 저시력 수험생용 복사본은 글자와 그림 둘레에 무늬가 없다. 그 수험번호는 무늬가 들어가는 칸만으로
+    # 견준다. 그래야 빈 칸이 점수를 깎지 않고, 다른 수험번호의 점수와 같은 잣대가 된다.
+    kept: NDArray[np.bool_] | None = None
+    narrow: NDArray[np.float64] | None = None
+    narrow_norm = 0.0
+    unread = False
+    if any(low) and all(entry.open is not None for entry in evidence):
+        kept = np.concatenate([entry.open for entry in evidence if entry.open is not None])
+        if int(kept.sum()) >= MIN_CELLS:
+            narrow = values[kept] - values[kept].mean()
+            narrow_norm = float(np.linalg.norm(narrow))
     scores = np.empty(len(keys), dtype=np.float64)
     for position, key in enumerate(keys):
         signs = np.concatenate(
@@ -515,6 +551,14 @@ def _decide(
                 for entry in evidence
             ]
         )
+        if position < len(low) and low[position]:
+            if kept is None or narrow is None or narrow_norm == 0.0:
+                # 견줄 칸이 모자라다. 이 수험번호는 가리키지 않는다.
+                scores[position] = 0.0
+                unread = True
+                continue
+            scores[position] = float(np.where(signs[kept], 1.0, -1.0) @ narrow) / narrow_norm
+            continue
         # 무늬와 무관한 문서라면 이 값은 평균 0, 표준편차 1에 가깝다.
         scores[position] = float(np.where(signs, 1.0, -1.0) @ values) / norm
     order = np.argsort(scores)[::-1]
@@ -532,6 +576,11 @@ def _decide(
         )
     else:
         reason = "어느 수험번호의 무늬와도 뚜렷하게 맞지 않는다."
+        if unread:
+            reason += (
+                " 저시력 수험생용 복사본은 여백의 칸이 모자라 견주지 못했다. "
+                "여백까지 나온 쪽 전체의 그림이나 PDF가 있어야 한다."
+            )
     return TraceResult(
         found=clear,
         method=method,

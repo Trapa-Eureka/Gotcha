@@ -107,6 +107,8 @@ code { padding: 1px 5px; background: var(--code); border-radius: 4px; font-size:
     <p class="about" id="copies-about"></p>
     <label for="copies-ids">수험번호 목록 (한 줄에 하나. CSV를 붙여 넣으면 첫 열을 쓴다)</label>
     <textarea id="copies-ids" spellcheck="false" autocomplete="off"></textarea>
+    <label for="copies-low">저시력 수험번호 (없으면 비워 둔다. 이 번호의 복사본은 글자와 그림 둘레를 비우고 여백에만 무늬를 넣는다)</label>
+    <textarea id="copies-low" spellcheck="false" autocomplete="off"></textarea>
     <label for="copies-seed">시드 파일 경로</label>
     <input id="copies-seed" type="text" value="secrets/exam.seed" spellcheck="false" autocomplete="off">
     <label for="copies-map">매핑표를 쓸 경로</label>
@@ -274,78 +276,117 @@ function showCopiesProfile() {
   byId("copies-about").textContent = chosen ? chosen.description : "";
 }
 
-async function watchProgress(box, running) {
-  // 오래 걸리는 일이라 몇 개 만들었는지 따로 물어 보여 준다.
-  while (running.on) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (!running.on) break;
+const WAITING = { copies: "만드는 중이다. 수험번호가 많으면 시간이 걸린다.", trace: "추적하는 중이다." };
+
+async function followJob(id, box, kind) {
+  // 오래 걸리는 일은 시작만 하고, 끝날 때까지 진행을 물어 본다. 응답 하나를 몇 분씩 기다리지 않는다.
+  let misses = 0;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    let state;
     try {
-      const response = await fetch("/api/progress?t=" + encodeURIComponent(TOKEN));
-      const state = await response.json();
-      if (running.on && state.total) {
-        box.replaceChildren(el("p", "about", state.label + " " + state.done + "/" + state.total + " 만드는 중이다."));
-      }
-    } catch (error) { /* 다음에 다시 물어 본다. */ }
+      const response = await fetch("/api/job?t=" + encodeURIComponent(TOKEN) + "&id=" + encodeURIComponent(id));
+      state = await response.json();
+      if (!response.ok) throw Object.assign(new Error(state.error || "작업을 찾지 못했다."), { final: true });
+      misses = 0;
+    } catch (error) {
+      // 잠깐 끊긴 것은 다시 물어 본다. 프로그램이 꺼졌으면 그만둔다.
+      if (error.final || ++misses > 20) throw error.final ? error : new Error("프로그램과 연결이 끊겼다. examshield ui가 켜져 있는지 본다.");
+      continue;
+    }
+    if (state.state === "done") return state.result;
+    if (state.state === "failed") throw new Error(state.error || "작업이 실패했다.");
+    box.replaceChildren(el("p", "about",
+      state.total ? state.label + " " + state.done + "/" + state.total + " 만드는 중이다." : WAITING[kind]));
   }
 }
 
-async function runCopies() {
+function showCopies(box, answer) {
+  const nodes = [el("p", "verdict " + (answer.passed ? "ok" : "bad"),
+    answer.passed ? "복사본을 출력 폴더에 썼다." : "검사 실패. 복사본을 쓰지 않았다.")];
+  nodes.push(el("pre", "", answer.summary));
+  for (const note of answer.notes || []) nodes.push(el("p", "warn", note));
+  for (const warning of answer.warnings || []) nodes.push(el("p", "warn", warning));
+  box.replaceChildren(...nodes);
+}
+
+function showTrace(box, answer) {
+  box.replaceChildren(
+    el("p", "verdict " + (answer.found ? "ok" : "bad"), answer.found ? "찾았다" : "찾지 못했다"),
+    el("pre", "", answer.summary),
+  );
+}
+
+const JOBS = {
+  copies: { box: "copies-result", button: "copies-run", show: showCopies },
+  trace: { box: "trace-result", button: "trace-run", show: showTrace },
+};
+
+async function runJob(kind, payload) {
+  const { box: boxId, button: buttonId, show } = JOBS[kind];
+  const box = byId(boxId);
+  const button = byId(buttonId);
+  button.disabled = true;
+  box.replaceChildren(el("p", "about", WAITING[kind]));
+  try {
+    const started = await call("/api/" + kind, await payload());
+    show(box, await followJob(started.job, box, kind));
+  } catch (error) {
+    showError(box, error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function resumeJob() {
+  // 화면을 새로 열었을 때 돌고 있거나 막 끝난 작업이 있으면 이어서 보여 준다.
+  try {
+    const response = await fetch("/api/job?t=" + encodeURIComponent(TOKEN));
+    const state = await response.json();
+    const known = JOBS[state.kind];
+    if (!response.ok || !known) return;
+    const box = byId(known.box);
+    if (state.state === "done") return known.show(box, state.result);
+    if (state.state === "failed") return showError(box, new Error(state.error || "작업이 실패했다."));
+    const button = byId(known.button);
+    button.disabled = true;
+    box.replaceChildren(el("p", "about", WAITING[state.kind]));
+    try {
+      known.show(box, await followJob(state.id, box, state.kind));
+    } catch (error) {
+      showError(box, error);
+    } finally {
+      button.disabled = false;
+    }
+  } catch (error) { /* 이어 볼 것이 없다. */ }
+}
+
+function runCopies() {
   const box = byId("copies-result");
   const file = byId("copies-file").files[0];
   if (!file) return showError(box, new Error("원본 파일을 고른다."));
   if (!byId("copies-ids").value.trim()) return showError(box, new Error("수험번호 목록을 적는다."));
-  const button = byId("copies-run");
-  const running = { on: true };
-  button.disabled = true;
-  box.replaceChildren(el("p", "about", "만드는 중이다. 수험번호가 많으면 시간이 걸린다."));
-  watchProgress(box, running);
-  try {
-    const answer = await call("/api/copies", {
-      name: file.name, file: await readBase64(file), profile: byId("copies-profile").value,
-      ids: byId("copies-ids").value, seed_path: byId("copies-seed").value,
-      map_path: byId("copies-map").value, out_dir: byId("copies-out").value,
-      resume: byId("copies-resume").checked,
-    });
-    running.on = false;
-    const nodes = [el("p", "verdict " + (answer.passed ? "ok" : "bad"),
-      answer.passed ? "복사본을 출력 폴더에 썼다." : "검사 실패. 복사본을 쓰지 않았다.")];
-    nodes.push(el("pre", "", answer.summary));
-    for (const note of answer.notes || []) nodes.push(el("p", "warn", note));
-    for (const warning of answer.warnings || []) nodes.push(el("p", "warn", warning));
-    box.replaceChildren(...nodes);
-  } catch (error) {
-    running.on = false;
-    showError(box, error);
-  } finally {
-    running.on = false;
-    button.disabled = false;
-  }
+  return runJob("copies", async () => ({
+    name: file.name, file: await readBase64(file), profile: byId("copies-profile").value,
+    ids: byId("copies-ids").value, seed_path: byId("copies-seed").value,
+    map_path: byId("copies-map").value, out_dir: byId("copies-out").value,
+    resume: byId("copies-resume").checked, low_vision: byId("copies-low").value,
+  }));
 }
 
-async function runTrace() {
+function runTrace() {
   const box = byId("trace-result");
   const leaked = Array.from(byId("trace-leaked").files);
   const original = byId("trace-original").files[0];
   if (!leaked.length || !original) return showError(box, new Error("유출본과 원본을 모두 고른다."));
-  const button = byId("trace-run");
-  button.disabled = true;
-  box.replaceChildren(el("p", "about", "추적하는 중이다."));
-  try {
+  return runJob("trace", async () => {
     const files = [];
     for (const file of leaked) files.push({ name: file.name, file: await readBase64(file) });
-    const answer = await call("/api/trace", {
+    return {
       name: original.name, file: await readBase64(original), leaked: files,
       seed_path: byId("trace-seed").value, map_path: byId("trace-map").value,
-    });
-    box.replaceChildren(
-      el("p", "verdict " + (answer.found ? "ok" : "bad"), answer.found ? "찾았다" : "찾지 못했다"),
-      el("pre", "", answer.summary),
-    );
-  } catch (error) {
-    showError(box, error);
-  } finally {
-    button.disabled = false;
-  }
+    };
+  });
 }
 
 async function loadProfiles() {
@@ -383,6 +424,7 @@ byId("copies-profile").addEventListener("change", showCopiesProfile);
 byId("copies-run").addEventListener("click", runCopies);
 byId("trace-run").addEventListener("click", runTrace);
 loadProfiles().catch((error) => showError(byId("protect-result"), error));
+resumeJob();
 </script>
 </body>
 </html>

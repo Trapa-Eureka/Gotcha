@@ -20,7 +20,7 @@ from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
 from examshield.progress import Progress
-from examshield.protect.batch import CopiesFailed, inside, make_copies
+from examshield.protect.batch import CopiesFailed, inside, low_vision_lines, make_copies
 from examshield.protect.copies import (
     check_seed,
     keyed_technique,
@@ -614,6 +614,12 @@ def protect(
         "--resume",
         help="--copies가 중간에 끊겼을 때 이미 만든 복사본은 두고 나머지만 만든다. 입력, 프로파일, 시드가 같아야 한다.",
     ),
+    low_vision: Path | None = typer.Option(
+        None,
+        "--low-vision",
+        help="저시력 수험번호 CSV(--copies 목록의 일부). 이 번호의 복사본은 글자와 그림 둘레를 "
+        "비우고 여백에만 무늬를 넣는다. 출력 폴더 안은 안 된다.",
+    ),
 ) -> None:
     failed = 0
     loaded: Profile | None = None
@@ -630,9 +636,21 @@ def protect(
             answers = read_answer_key(answer_key)
         if copies is not None:
             _protect_copies(
-                sources, out, loaded, seed_file, force, copies, map_file, answers, jobs, resume
+                sources,
+                out,
+                loaded,
+                seed_file,
+                force,
+                copies,
+                map_file,
+                answers,
+                jobs,
+                resume,
+                low_vision,
             )
             return
+        if low_vision is not None:
+            raise ExamShieldError("--low-vision은 --copies와 함께 쓴다.")
         if map_file is not None:
             raise ExamShieldError("--map-file은 --copies와 함께 쓴다.")
         if jobs is not None:
@@ -727,6 +745,7 @@ def _protect_copies(
     answers: AnswerKey | None = None,
     jobs: int | None = None,
     resume: bool = False,
+    low_vision: Path | None = None,
 ) -> None:
     if len(sources) != 1:
         raise ExamShieldError("--copies는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
@@ -736,6 +755,7 @@ def _protect_copies(
         raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
     check_seed(seed_file.read_bytes() if seed_file is not None else None)
     ids = read_examinee_ids(copies)
+    low = read_examinee_ids(low_vision) if low_vision is not None else []
     if out.exists() and not out.is_dir():
         raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
     if out.is_dir() and out.samefile(source.parent):
@@ -765,7 +785,11 @@ def _protect_copies(
             resume=resume,
             force=force,
             ocr=engine.read if engine else None,
-            keep_out=(("수험번호 목록", copies),),
+            low_vision=low,
+            keep_out=(
+                ("수험번호 목록", copies),
+                *((("저시력 수험번호 목록", low_vision),) if low_vision is not None else ()),
+            ),
             on_start=started,
             on_step=lambda: shown[0].step(),
         )
@@ -784,6 +808,8 @@ def _protect_copies(
     typer.echo(
         f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개). 목록의 제목 줄이 번호로 읽히지 않았는지 확인한다."
     )
+    for line in low_vision_lines(batch):
+        typer.echo(line)
     typer.echo(f"매핑표: {batch.table}")
     typer.echo("매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.")
 

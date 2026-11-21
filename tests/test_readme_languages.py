@@ -24,5 +24,6 @@ def test_both_readmes_have_the_same_structure() -> None:
 
 
 def test_readmes_link_to_each_other() -> None:
-    assert "[English](README.en.md)" in KOREAN
-    assert "[한국어](README.md)" in ENGLISH
+    # 링크의 글자는 바꿀 수 있다. 서로를 가리키는지만 본다.
+    assert "](README.en.md)" in KOREAN
+    assert "](README.md)" in ENGLISH

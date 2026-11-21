@@ -3,6 +3,10 @@
 127.0.0.1에만 붙고, 시작할 때 만든 토큰이 있어야 쓸 수 있다. 올린 파일은 이 프로세스의 메모리에서
 처리해 결과를 브라우저로 돌려준다. 디스크에는 Word·한글 변환용 임시 파일만 잠깐 쓴다.
 
+오래 걸리는 일(수험번호별 복사본, 추적)은 요청 하나로 끝까지 기다리지 않는다. 시작 요청은 작업
+번호만 돌려주고, 화면이 그 번호로 진행과 결과를 물어 본다. 브라우저가 몇 분짜리 응답을 기다리다
+끊어도 작업은 끝까지 가고, 결과는 다음 작업을 시작할 때까지 남아 있다.
+
 수험번호별 복사본과 추적은 다르다. 시드 파일과 매핑표는 브라우저를 거치지 않는다. 화면에는 경로만
 적고, 서버가 이 PC의 그 파일을 직접 읽고 쓴다. 복사본도 내려받기 대신 출력 폴더에 쓴다. 경로는
 웹 화면을 띄운 폴더 안으로만 받는다.
@@ -15,6 +19,8 @@ import json
 import re
 import secrets
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,7 +41,7 @@ from examshield.convert import (
 from examshield.errors import ExamShieldError
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
-from examshield.protect.batch import CopiesFailed, make_copies
+from examshield.protect.batch import CopiesFailed, low_vision_lines, make_copies
 from examshield.protect.copies import keyed_technique, parse_examinee_ids, read_map
 from examshield.protect.pipeline import KEYED, expectation_from_text, protect_and_check
 from examshield.trace.detect import MAX_LEAKED_FILES, format_trace, trace_many
@@ -69,6 +75,38 @@ class Refused(Exception):
         self.message = message
 
 
+RUNNING, DONE, FAILED = "running", "done", "failed"
+
+
+@dataclass
+class Job:
+    """오래 걸리는 일 하나. 화면이 번호로 진행과 결과를 물어 본다.
+
+    결과에는 화면에 보여 줄 요약만 든다. 올린 파일, 시드, 매핑표의 내용은 들지 않는다.
+    """
+
+    id: str = field(default_factory=lambda: secrets.token_urlsafe(12))
+    kind: str = ""
+    state: str = RUNNING
+    label: str = ""
+    done: int = 0
+    total: int = 0
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+    def view(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "state": self.state,
+            "label": self.label,
+            "done": self.done,
+            "total": self.total,
+            "result": self.result,
+            "error": self.error,
+        }
+
+
 class Service:
     """화면이 부르는 기능. HTTP와 떨어져 있어 따로 테스트할 수 있다."""
 
@@ -84,8 +122,8 @@ class Service:
         self.records = records or RECORD_DIR
         # 화면에 적은 경로는 이 폴더 안으로만 받는다.
         self.base_dir = (base_dir or Path.cwd()).resolve()
-        # 오래 걸리는 일의 진행. 화면이 따로 물어 본다.
-        self.progress: dict[str, Any] = {"label": "", "done": 0, "total": 0}
+        # 가장 최근에 시작한 오래 걸리는 일. 다음 것을 시작하면 바뀐다.
+        self.job: Job | None = None
         # 문서 처리는 한 번에 하나만 한다. 연결은 여러 개를 받아도 메모리와 CPU는 하나 몫만 쓴다.
         self.busy = threading.Lock()
 
@@ -206,10 +244,29 @@ class Service:
         map_path: str,
         out_dir: str,
         resume: bool,
+        low_text: str = "",
     ) -> dict[str, Any]:
+        return self.plan_copies(
+            name, data, profile_name, ids_text, seed_path, map_path, out_dir, resume, low_text
+        )(Job())
+
+    def plan_copies(
+        self,
+        name: str,
+        data: bytes,
+        profile_name: str,
+        ids_text: str,
+        seed_path: str,
+        map_path: str,
+        out_dir: str,
+        resume: bool,
+        low_text: str = "",
+    ) -> Callable[[Job], dict[str, Any]]:
+        """적어 준 값을 바로 확인하고, 복사본을 만드는 일을 돌려준다. 잘못 적은 것은 여기서 걸린다."""
         profile = load_profile(profile_name)
         keyed_technique(profile)
         ids = parse_examinee_ids(ids_text, "수험번호 목록")
+        low = parse_examinee_ids(low_text, "저시력 수험번호 목록") if low_text.strip() else []
         seed_file = self.local_path(seed_path, "시드 파일")
         table = self.local_path(map_path, "매핑표")
         out = self.local_path(out_dir, "출력 폴더")
@@ -217,41 +274,49 @@ class Service:
         engine = find_tesseract()
         label = Path(name)
 
-        def started(kept: int, total: int) -> None:
-            self.progress = {"label": "복사본", "done": kept, "total": total}
+        def work(job: Job) -> dict[str, Any]:
+            def started(kept: int, total: int) -> None:
+                job.label, job.done, job.total = "복사본", kept, total
 
-        def stepped() -> None:
-            self.progress = {**self.progress, "done": self.progress["done"] + 1}
+            def stepped() -> None:
+                job.done += 1
 
-        try:
-            batch = make_copies(
-                stem=stem,
-                load=lambda: self._document(name, data)[0],
-                out=out,
-                profile=profile,
-                seed_file=seed_file,
-                ids=ids,
-                table=table,
-                resume=resume,
-                ocr=engine.read if engine else None,
-                on_start=started,
-                on_step=stepped,
-            )
-        except CopiesFailed as error:
-            return {"passed": False, "summary": f"{error}\n{error.detail}", "notes": []}
-        finally:
-            self.progress = {"label": "", "done": 0, "total": 0}
-        _label, warnings = self._warnings(profile)
-        notes = [HWP_NOTICE] if needs_review(label) else []
-        lines = [
-            f"복사본 {len(batch.rows)}개, 모두 검사 통과",
-            f"이번에 만든 것 {batch.made}개, 그대로 둔 것 {batch.kept}개",
-            f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개)",
-            f"출력 폴더: {out.relative_to(self.base_dir)}",
-            f"매핑표: {table.relative_to(self.base_dir)}",
-            "매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.",
-        ]
-        return {"passed": True, "summary": "\n".join(lines), "warnings": warnings, "notes": notes}
+            try:
+                batch = make_copies(
+                    stem=stem,
+                    load=lambda: self._document(name, data)[0],
+                    out=out,
+                    profile=profile,
+                    seed_file=seed_file,
+                    ids=ids,
+                    table=table,
+                    resume=resume,
+                    ocr=engine.read if engine else None,
+                    low_vision=low,
+                    on_start=started,
+                    on_step=stepped,
+                )
+            except CopiesFailed as error:
+                return {"passed": False, "summary": f"{error}\n{error.detail}", "notes": []}
+            _label, warnings = self._warnings(profile)
+            notes = [HWP_NOTICE] if needs_review(label) else []
+            lines = [
+                f"복사본 {len(batch.rows)}개, 모두 검사 통과",
+                f"이번에 만든 것 {batch.made}개, 그대로 둔 것 {batch.kept}개",
+                f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개)",
+                *low_vision_lines(batch),
+                f"출력 폴더: {out.relative_to(self.base_dir)}",
+                f"매핑표: {table.relative_to(self.base_dir)}",
+                "매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.",
+            ]
+            return {
+                "passed": True,
+                "summary": "\n".join(lines),
+                "warnings": warnings,
+                "notes": notes,
+            }
+
+        return work
 
     def trace(
         self,
@@ -261,6 +326,16 @@ class Service:
         seed_path: str,
         map_path: str,
     ) -> dict[str, Any]:
+        return self.plan_trace(name, original, leaked, seed_path, map_path)(Job())
+
+    def plan_trace(
+        self,
+        name: str,
+        original: bytes,
+        leaked: list[tuple[str, bytes]],
+        seed_path: str,
+        map_path: str,
+    ) -> Callable[[Job], dict[str, Any]]:
         seed_file = self.local_path(seed_path, "시드 파일")
         table = self.local_path(map_path, "매핑표")
         for label, path in (("시드 파일", seed_file), ("매핑표", table)):
@@ -268,14 +343,55 @@ class Service:
                 raise ExamShieldError(f"{label}을 찾지 못했다: {path.relative_to(self.base_dir)}")
         if not 1 <= len(leaked) <= MAX_LEAKED_FILES:
             raise ExamShieldError(f"유출본은 1개에서 {MAX_LEAKED_FILES}개까지 받는다.")
-        document, _label = self._document(name, original)
-        result = trace_many(
-            [(safe_name(entry) or "유출본", data, Path(entry).suffix) for entry, data in leaked],
-            document,
-            read_map(table),
-            seed_file.read_bytes(),
-        )
-        return {"found": result.found, "summary": format_trace(result)}
+
+        def work(job: Job) -> dict[str, Any]:
+            job.label = "추적"
+            document, _label = self._document(name, original)
+            result = trace_many(
+                [
+                    (safe_name(entry) or "유출본", data, Path(entry).suffix)
+                    for entry, data in leaked
+                ],
+                document,
+                read_map(table),
+                seed_file.read_bytes(),
+            )
+            return {"found": result.found, "summary": format_trace(result)}
+
+        return work
+
+    def start(self, kind: str, work: Callable[[Job], dict[str, Any]]) -> Job:
+        """오래 걸리는 일을 따로 돌리고 바로 돌아온다. 한 번에 하나만 돌린다."""
+        if not self.busy.acquire(blocking=False):
+            raise Refused(HTTPStatus.CONFLICT, "다른 작업이 진행 중이다. 끝난 뒤에 다시 한다.")
+        job = Job(kind=kind)
+        self.job = job
+
+        def run() -> None:
+            try:
+                job.result = work(job)
+                job.state = DONE
+            except ExamShieldError as error:
+                job.error, job.state = str(error), FAILED
+            except Exception:  # 내용은 내보내지 않는다.
+                job.error = "파일을 처리하지 못했다. 깨졌거나 지원하지 않는 형식일 수 있다."
+                job.state = FAILED
+            finally:
+                self.busy.release()
+
+        threading.Thread(target=run, daemon=True, name=f"examshield-{kind}").start()
+        return job
+
+    def job_view(self, wanted: str) -> dict[str, Any]:
+        """작업의 진행과 결과. 번호를 주지 않으면 가장 최근 것을 돌려준다(화면을 새로 열었을 때)."""
+        job = self.job
+        if job is None or (wanted and not hmac.compare_digest(wanted.encode(), job.id.encode())):
+            if wanted:
+                raise Refused(
+                    HTTPStatus.NOT_FOUND, "그런 작업이 없다. 다른 작업을 시작했을 수 있다."
+                )
+            return {"state": "none"}
+        return job.view()
 
 
 def safe_name(text: str) -> str:
@@ -359,8 +475,9 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
                             "base_dir": str(service.base_dir),
                         },
                     )
-                elif url.path == "/api/progress":
-                    self._json(HTTPStatus.OK, dict(service.progress))
+                elif url.path == "/api/job":
+                    wanted = parse_qs(url.query).get("id", [""])[0]
+                    self._json(HTTPStatus.OK, service.job_view(wanted))
                 else:
                     raise Refused(HTTPStatus.NOT_FOUND, "없는 주소다.")
             except Refused as error:
@@ -413,17 +530,22 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
                     ids_text = payload.get("ids")
                     if not isinstance(ids_text, str) or len(ids_text) > MAX_IDS_CHARS:
                         raise Refused(HTTPStatus.BAD_REQUEST, "수험번호 목록이 없거나 너무 길다.")
-                    with service.busy:
-                        answer = service.copies(
-                            name,
-                            document,
-                            _text(payload.get("profile"), "프로파일"),
-                            ids_text,
-                            _text(payload.get("seed_path"), "시드 파일 경로"),
-                            _text(payload.get("map_path"), "매핑표 경로"),
-                            _text(payload.get("out_dir"), "출력 폴더"),
-                            payload.get("resume") is True,
-                        )
+                    low_text = payload.get("low_vision", "")
+                    if not isinstance(low_text, str) or len(low_text) > MAX_IDS_CHARS:
+                        raise Refused(HTTPStatus.BAD_REQUEST, "저시력 수험번호 목록이 너무 길다.")
+                    planned = service.plan_copies(
+                        name,
+                        document,
+                        _text(payload.get("profile"), "프로파일"),
+                        ids_text,
+                        _text(payload.get("seed_path"), "시드 파일 경로"),
+                        _text(payload.get("map_path"), "매핑표 경로"),
+                        _text(payload.get("out_dir"), "출력 폴더"),
+                        payload.get("resume") is True,
+                        low_text,
+                    )
+                    self._json(HTTPStatus.ACCEPTED, {"job": service.start("copies", planned).id})
+                    return
                 elif path == "/api/trace":
                     listed = payload.get("leaked")
                     if not isinstance(listed, list) or not listed:
@@ -438,14 +560,15 @@ def make_handler(service: Service, token: str) -> type[BaseHTTPRequestHandler]:
                                 _decode(entry.get("file"), "유출본"),
                             )
                         )
-                    with service.busy:
-                        answer = service.trace(
-                            name,
-                            document,
-                            leaked,
-                            _text(payload.get("seed_path"), "시드 파일 경로"),
-                            _text(payload.get("map_path"), "매핑표 경로"),
-                        )
+                    planned = service.plan_trace(
+                        name,
+                        document,
+                        leaked,
+                        _text(payload.get("seed_path"), "시드 파일 경로"),
+                        _text(payload.get("map_path"), "매핑표 경로"),
+                    )
+                    self._json(HTTPStatus.ACCEPTED, {"job": service.start("trace", planned).id})
+                    return
                 else:
                     job = payload.get("job")
                     if job is not None and not isinstance(job, str):
