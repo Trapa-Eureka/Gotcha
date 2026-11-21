@@ -637,20 +637,41 @@ def test_trace_stops_reading_pages_once_one_names_the_examinee(sample_pdf: bytes
             values = np.where(marks, 1.0, -1.0) + rng.normal(scale=2.0, size=rows * cols)
         return detect.Evidence(index, rows, cols, cells, values - values.mean())
 
-    def pages(owners: list[bytes | None]) -> Iterator[detect.Evidence]:
+    def pages(
+        owners: list[bytes | None], fits: tuple[int, ...] = (900, 40, 30, 25)
+    ) -> Iterator[tuple[int, detect.Evidence | None]]:
         for index, owner in enumerate(owners):
             read.append(index)
-            yield page_of(owner, index)
+            yield fits[index], page_of(owner, index)
 
-    found, used = detect._best_page(pages([None, keys[7], None, None]), reader, "이미지 정합")
+    found, used, placed = detect._best_page(
+        pages([None, keys[7], None, None]), reader, "이미지 정합"
+    )
     assert found.found and found.examinee_id == IDS[7] and found.pages == (2,)
-    assert read == [0, 1] and [entry.page_index for entry in used] == [1]
+    assert read == [0, 1] and [entry.page_index for entry in used] == [1] and placed
 
     read.clear()
-    nobody, kept = detect._best_page(pages([None, None, None]), reader, "이미지 정합")
-    assert not nobody.found and read == [0, 1, 2] and len(kept) == 1
-    empty, nothing = detect._best_page(iter(()), reader, "이미지 정합")
-    assert not empty.found and nothing == []
+    nobody, kept, placed = detect._best_page(pages([None, None, None]), reader, "이미지 정합")
+    assert not nobody.found and read == [0, 1, 2] and placed
+    # 합산에는 무늬의 점수가 아니라 그림이 가장 잘 맞춰진 쪽(첫째)의 칸을 쓴다.
+    assert [entry.page_index for entry in kept] == [0]
+    # 어느 쪽과도 맞춰지지 않은 그림은 보탤 칸이 없을 뿐이다. 쪽을 헷갈린 것으로 치지 않는다.
+    empty, nothing, placed = detect._best_page(iter(()), reader, "이미지 정합")
+    assert not empty.found and nothing == [] and placed
+
+    # 내용이 같은 쪽들은 똑같이 잘 맞춰진다. 어느 쪽인지 모르므로 합산에 넣지 않는다.
+    unsure, left_out, placed = detect._best_page(
+        pages([None, None, None], fits=(400, 390, 30)), reader, "이미지 정합"
+    )
+    assert not unsure.found and left_out == [] and not placed
+
+    # 가장 잘 맞춰진 쪽에 읽을 빈 바탕이 없으면, 덜 맞춰진 쪽의 칸으로 대신하지 않는다.
+    def blank_first() -> Iterator[tuple[int, detect.Evidence | None]]:
+        yield 800, None
+        yield 30, page_of(None, 1)
+
+    _, nothing, placed = detect._best_page(blank_first(), reader, "이미지 정합")
+    assert nothing == [] and placed
 
 
 def test_the_page_in_a_capture_is_ranked_first_before_exact_matching() -> None:
@@ -685,7 +706,9 @@ def test_the_page_in_a_capture_is_ranked_first_before_exact_matching() -> None:
             [watermark.derive_key(SEED, examinee) for examinee in IDS[:6]],
             dots=False,
         )
-        found, _ = detect._best_page(detect._from_image(reader, shot, pages), reader, "이미지 정합")
+        found, _, _ = detect._best_page(
+            detect._from_image(reader, shot, pages), reader, "이미지 정합"
+        )
         # 찍힌 쪽 하나만 크게 그려 맞춰 봤다.
         assert found.found and found.examinee_id == IDS[3] and found.pages == (number + 1,)
         assert drawn == [number]
@@ -804,3 +827,44 @@ def test_cli_trace_takes_several_leaked_files(tmp_path: Path) -> None:
     assert all_of_them.exit_code == 0, all_of_them.output
     assert IDS[5] in all_of_them.output and "여러 장 합산" in all_of_them.output
     assert missing.exit_code == 2
+
+
+def test_the_same_file_given_twice_is_counted_once() -> None:
+    from examshield.trace.detect import trace_many  # noqa: PLC0415
+
+    pdf, rows, copies = many_copies()
+    shots = [(f"shot-{page}.png", small_shot(copies[5], page), ".png") for page in range(6)]
+    copied = [(f"again-{name}", data, suffix) for name, data, suffix in shots]
+
+    once = trace_many(shots, pdf, rows, SEED)
+    twice = trace_many([*shots, *copied], pdf, rows, SEED)
+    single = trace_many([shots[0], copied[0]], pdf, rows, SEED)
+
+    assert twice.score == once.score and twice.cells == once.cells
+    assert len(twice.parts) == 6 and "똑같은 파일 6개는 한 번만" in format_trace(twice)
+    # 같은 파일 둘뿐이면 한 장을 준 것과 같다. 합산하지 않는다.
+    assert single.method == "이미지 정합" and single.parts == ()
+    assert "똑같은 파일 1개" in format_trace(single)
+
+
+def test_a_small_capture_of_a_page_that_repeats_is_left_out_of_the_sum() -> None:
+    """같은 쪽이 두 번 든 문서. 그 쪽의 작은 캡처는 어느 쪽인지 알 수 없어 합산에서 빠진다."""
+    from examshield.benchmark import load_items, render_items_pdf  # noqa: PLC0415
+    from examshield.trace.detect import trace_many  # noqa: PLC0415
+
+    doc = open_pdf_bytes(render_items_pdf(load_items().items))
+    doc.fullcopy_page(0)
+    pdf = save_deterministic(doc)
+    _, made = protect_copies(pdf, load_profile("a-watermark"), SEED, IDS[:8])
+    copies = list(made)
+    rows = [map_row(copy, SEED, f"{copy.examinee_id}.pdf") for copy in copies]
+    leaked = copies[5].protected.pdf
+    shots = [(f"shot-{page}.png", small_shot(leaked, page), ".png") for page in range(7)]
+
+    result = trace_many(shots, pdf, rows, SEED)
+    shown = format_trace(result)
+
+    assert result.found and result.examinee_id == IDS[5]
+    # 첫 쪽(마지막 쪽과 내용이 같다)의 캡처는 빠지고 나머지 여섯 장의 칸만 합쳤다.
+    assert 1 not in result.pages and 13 not in result.pages and len(result.pages) == 6
+    assert "정하지 못한 1장은 합산에서 뺐다(shot-0.png)" in shown

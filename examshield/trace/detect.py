@@ -36,6 +36,8 @@ MIN_MARGIN = 3.0
 MIN_INLIERS = 20
 MATCH_RATIO = 0.75
 MAX_LEAKED_FILES = 50
+# 여러 장을 합칠 때, 그림이 가장 잘 맞춰진 쪽이 다음 쪽보다 이만큼은 더 잘 맞아야 그 쪽으로 본다.
+DOMINANT_FIT = 1.5
 # 쪽 순서를 정할 때 쓰는 줄인 그림의 긴 변과 특징점 수.
 COARSE_SIDE = 700
 COARSE_FEATURES = 1500
@@ -71,6 +73,8 @@ class TraceResult:
     suspects: tuple[str, ...] = ()
     # 유출본을 여러 개 줬을 때 파일(또는 쪽)마다의 결과. (이름, 결과)
     parts: tuple[tuple[str, "TraceResult"], ...] = ()
+    # 합산에서 뺀 것처럼, 결과를 읽을 때 알아야 하는 것.
+    notes: tuple[str, ...] = ()
 
 
 class _Pages:
@@ -174,7 +178,16 @@ def trace_many(
         low=tuple(bool(row.clear_pt) for row in rows),
     )
     parts: list[tuple[str, TraceResult, list[Evidence]]] = []
+    unplaced: list[str] = []
+    seen: set[str] = set()
+    repeated = 0
     for label, data, suffix in files:
+        # 같은 파일을 두 번 주면 같은 칸을 두 번 세어 점수가 부풀려진다. 한 번만 센다.
+        digest = sha256_hex(data)
+        if digest in seen:
+            repeated += 1
+            continue
+        seen.add(digest)
         kind = suffix.lower()
         if kind == PDF_SUFFIX:
             whole = _from_pdf(reader, data)
@@ -184,17 +197,37 @@ def trace_many(
             # 쪽수나 쪽 크기가 원본과 다른 PDF는 캡처나 사진을 묶은 것으로 보고 쪽마다 그림으로 읽는다.
             for number, image in enumerate(_pdf_pages(data, reader.dpi), start=1):
                 name = f"{label} {number}쪽".strip()
-                parts.append((name, *_from_shot(reader, image)))
+                result, evidence, placed = _from_shot(reader, image)
+                parts.append((name, result, evidence))
+                if not placed:
+                    unplaced.append(name)
         elif kind in IMAGE_SUFFIXES:
-            parts.append((label, *_from_shot(reader, decode_photo(data))))
+            result, evidence, placed = _from_shot(reader, decode_photo(data))
+            parts.append((label, result, evidence))
+            if not placed:
+                unplaced.append(label)
         else:
             raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
+    notes: list[str] = []
+    if repeated:
+        notes.append(f"내용이 똑같은 파일 {repeated}개는 한 번만 셌다.")
     if len(parts) == 1:
-        return parts[0][1]
+        return replace(parts[0][1], notes=tuple(notes))
+    if unplaced:
+        shown = ", ".join(unplaced[:5]) + (" 외" if len(unplaced) > 5 else "")
+        notes.append(
+            f"어느 쪽을 찍은 것인지 정하지 못한 {len(unplaced)}장은 합산에서 뺐다({shown}). "
+            "비슷하게 맞춰지는 쪽이 여럿이다. 내용이 같은 쪽이 있거나, 여러 쪽에 똑같이 있는 "
+            "부분(머리말 같은)만 찍혔다."
+        )
     combined = reader.decide(
         [entry for _, _, evidence in parts for entry in evidence], "여러 장 합산"
     )
-    return replace(combined, parts=tuple((label, result) for label, result, _ in parts))
+    return replace(
+        combined,
+        parts=tuple((label, result) for label, result, _ in parts),
+        notes=tuple(notes),
+    )
 
 
 def _pdf_pages(leaked: bytes, dpi: int) -> Iterator[Gray]:
@@ -202,13 +235,15 @@ def _pdf_pages(leaked: bytes, dpi: int) -> Iterator[Gray]:
         yield render_gray(page, dpi)
 
 
-def _from_shot(reader: _Reader, shot: Gray) -> tuple[TraceResult, list[Evidence]]:
-    """그림 한 장에서 읽어 낸 결과와, 합산에 쓸 칸.
+def _from_shot(reader: _Reader, shot: Gray) -> tuple[TraceResult, list[Evidence], bool]:
+    """그림 한 장에서 읽어 낸 결과, 합산에 쓸 칸, 그리고 쪽을 헷갈리지 않았는지.
+
+    마지막 값은 맞춰지는 쪽이 여럿인데 어느 쪽인지 가리지 못했을 때만 False다.
 
     잘 맞는 쪽부터 하나씩 읽어, 수험번호가 뚜렷하게 나오면 거기서 멈춘다.
     내용이 같은 쪽이 여럿이면 어느 쪽인지 그림만으로는 모른다. 그래서 맞춰지는 쪽을 차례로 재 본다.
     엉뚱한 쪽의 무늬로는 기준을 넘는 점수가 나오지 않으므로, 뚜렷한 답이 나오면 나머지는 재지 않는다.
-    끝까지 뚜렷한 답이 없으면 그중 점수가 가장 높은 것을 돌려준다.
+    끝까지 뚜렷한 답이 없으면 그중 점수가 가장 높은 것을 결과로 돌려준다.
     """
     method = "사진 정합" if reader.dots else "이미지 정합"
     pages = _Pages(reader.original, reader.dpi)
@@ -219,16 +254,35 @@ def _from_shot(reader: _Reader, shot: Gray) -> tuple[TraceResult, list[Evidence]
 
 
 def _best_page(
-    candidates: Iterator[Evidence], reader: _Reader, method: str
-) -> tuple[TraceResult, list[Evidence]]:
-    best: tuple[TraceResult, list[Evidence]] | None = None
-    for found in candidates:
+    candidates: Iterator[tuple[int, Evidence | None]], reader: _Reader, method: str
+) -> tuple[TraceResult, list[Evidence], bool]:
+    """candidates는 그림이 맞춰진 쪽마다 (맞은 특징점 수, 읽어 낸 칸 또는 None)이다.
+
+    합산에 쓸 쪽은 무늬의 점수가 아니라 그림이 얼마나 잘 맞춰졌는지로 고른다. 점수가 높은 쪽을
+    고르면 우연히 높게 나온 틀린 쪽을 고르게 되고, 그 칸은 합친 점수를 깎는다. 가장 잘 맞춰진 쪽이
+    다음 쪽을 뚜렷하게 앞서지 못하면(내용이 같은 쪽들) 어느 쪽인지 모르는 것이므로 합산에서 뺀다.
+    """
+    best: TraceResult | None = None
+    fits: list[tuple[int, Evidence | None]] = []
+    for fit, found in candidates:
+        fits.append((fit, found))
+        if found is None:
+            continue
         result = reader.decide([found], method)
         if result.found:
-            return result, [found]
-        if best is None or (result.score or 0.0) > (best[0].score or 0.0):
-            best = (result, [found])
-    return best if best is not None else (reader.decide([], method), [])
+            return result, [found], True
+        if best is None or (result.score or 0.0) > (best.score or 0.0):
+            best = result
+    shown = best if best is not None else reader.decide([], method)
+    if not fits:
+        # 원본의 어느 쪽과도 맞춰지지 않았다. 보탤 칸이 없을 뿐, 쪽을 헷갈린 것은 아니다.
+        return shown, [], True
+    fits.sort(key=lambda entry: -entry[0])
+    top_fit, top = fits[0]
+    if len(fits) > 1 and top_fit < DOMINANT_FIT * fits[1][0]:
+        return shown, [], False
+    # 쪽은 정했는데 그 쪽에서 읽을 빈 바탕이 없으면 보탤 칸이 없을 뿐이다.
+    return shown, ([top] if top is not None else []), True
 
 
 def _keys(rows: list[MapRow], seed: bytes) -> list[bytes]:
@@ -244,7 +298,9 @@ def _keys(rows: list[MapRow], seed: bytes) -> list[bytes]:
     return keys
 
 
-def _from_photo(reader: _Reader, shot: Gray, pages: "_Pages") -> Iterator[Evidence]:
+def _from_photo(
+    reader: _Reader, shot: Gray, pages: "_Pages"
+) -> Iterator[tuple[int, Evidence | None]]:
     """점 무늬가 든 복사본의 화면 캡처나 인쇄물 사진. 기울기와 원근 왜곡까지 바로잡는다."""
     known = features(shot)
     # 사진에 찍힌 쪽일 가능성이 높은 쪽부터 정밀하게 맞춰 본다. 맞춰 보는 일이 가장 오래 걸린다.
@@ -259,11 +315,12 @@ def _from_photo(reader: _Reader, shot: Gray, pages: "_Pages") -> Iterator[Eviden
         covered = cv2.warpPerspective(
             np.full(shot.shape, 255, dtype=np.uint8), matrix, (width, height)
         )
-        evidence = reader.read(
-            np.asarray(warped, dtype=np.uint8), np.asarray(covered) == 255, page, index
+        yield (
+            fit[0],
+            reader.read(
+                np.asarray(warped, dtype=np.uint8), np.asarray(covered) == 255, page, index
+            ),
         )
-        if evidence is not None:
-            yield evidence
 
 
 def _read_dots(
@@ -350,7 +407,9 @@ def _from_pdf(reader: _Reader, leaked: bytes) -> list[Evidence] | None:
     return evidence
 
 
-def _from_image(reader: _Reader, shot: Gray, pages: "_Pages") -> Iterator[Evidence]:
+def _from_image(
+    reader: _Reader, shot: Gray, pages: "_Pages"
+) -> Iterator[tuple[int, Evidence | None]]:
     """워터마크가 든 복사본의 화면 캡처. 캡처에 찍힌 쪽일 가능성이 높은 쪽부터 내놓는다."""
     known = _features(shot)
     for index in _likely_pages(shot, pages):
@@ -367,11 +426,12 @@ def _from_image(reader: _Reader, shot: Gray, pages: "_Pages") -> Iterator[Eviden
             (width, height),
             flags=cv2.INTER_LINEAR,
         )
-        found_cells = reader.read(
-            np.asarray(warped, dtype=np.uint8), np.asarray(covered) == 255, page, index
+        yield (
+            found[0],
+            reader.read(
+                np.asarray(warped, dtype=np.uint8), np.asarray(covered) == 255, page, index
+            ),
         )
-        if found_cells is not None:
-            yield found_cells
 
 
 def _small(image: Gray) -> Gray:
@@ -624,6 +684,8 @@ def format_trace(result: TraceResult) -> str:
                 "  주의: 유출본마다 다른 수험번호가 나왔다. 여러 응시자의 복사본이 섞여 있을 수 있다. "
                 "응시자별로 나눠서 다시 넣는다."
             )
+    for note in result.notes:
+        lines.append(f"참고         {note}")
     return "\n".join(lines)
 
 
