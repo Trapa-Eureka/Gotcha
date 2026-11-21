@@ -35,7 +35,7 @@ def anthropic_body(text: str, stop: str = "end_turn") -> dict[str, Any]:
         "content": [{"type": "text", "text": text}] if text else [],
         "stop_reason": stop,
         "stop_sequence": None,
-        "usage": {"input_tokens": 1, "output_tokens": 1},
+        "usage": {"input_tokens": 120, "output_tokens": 45},
     }
 
 
@@ -58,6 +58,13 @@ def openai_body(text: str) -> dict[str, Any]:
         "parallel_tool_calls": True,
         "tool_choice": "auto",
         "tools": [],
+        "usage": {
+            "input_tokens": 120,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 45,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 165,
+        },
     }
 
 
@@ -67,6 +74,13 @@ def google_body(text: str) -> dict[str, Any]:
             {"content": {"role": "model", "parts": [{"text": text}]}, "finishReason": "STOP"}
         ],
         "modelVersion": "gemini-test-001",
+        # 생각하는 데 쓴 토큰(15)도 출력으로 센다.
+        "usageMetadata": {
+            "promptTokenCount": 120,
+            "candidatesTokenCount": 30,
+            "thoughtsTokenCount": 15,
+            "totalTokenCount": 165,
+        },
     }
 
 
@@ -145,6 +159,7 @@ def test_each_vendor_answers_on_each_channel_through_its_own_sdk(
 
     assert reply.answer == 2
     assert reply.transcription == "1. 문제\n① 가 ② 나"
+    assert reply.tokens == (120, 45)
     assert model.info.version == VERSIONS[vendor]
     assert model.info.kind == "cloud"
     assert (base64.b64encode(PAGE.image_png).decode() in sent) == (channel == IMAGE)

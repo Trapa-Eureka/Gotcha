@@ -455,3 +455,55 @@ def test_a_real_reply_is_kept_word_for_word() -> None:
     reply = read_reply("못 읽겠다.\n정답 1: 3\n정답 2: 4", page)
 
     assert reply.raw == "못 읽겠다.\n정답 1: 3\n정답 2: 4" and reply.answers == {1: 3, 2: 4}
+
+
+class Metered:
+    """토큰 수를 알려 주고 호출마다 시간이 걸리는 척하는 모델."""
+
+    def __init__(self) -> None:
+        self.inner = MockModel(load_items("v2").items)
+        self.info = self.inner.info
+
+    def run(self, page: PageInput, channel: str) -> Any:
+        from dataclasses import replace  # noqa: PLC0415
+
+        return replace(self.inner.run(page, channel), tokens=(1000, 250), seconds=2.5)
+
+
+def test_report_counts_items_time_and_tokens() -> None:
+    profile = load_profile("a-remap-decoy")
+    report = run_verification(
+        profile,
+        load_items("v2"),
+        [TextLayerModel(), Metered()],
+        now=NOW,
+        transform=lambda pdf: protect_bytes(pdf, profile),
+    )
+    rows = {(row["model"], row["variant"]): row for row in report["results"]}
+    control, protected = rows[("mock-reader", "control")], rows[("mock-reader", "protected")]
+    baseline = rows[("text-layer", "control")]
+    shown = format_report(report)
+
+    assert (control["correct"], control["scored"]) == (36, 36)
+    assert protected["scored"] == 36 and protected["decoy_items"] is not None
+    assert protected["decoy_hits"] == round(protected["decoy_hit_rate"] * protected["decoy_items"])
+    # 아홉 쪽을 아홉 번 불렀다.
+    assert control["seconds"] == 22.5 and control["token_calls"] == 9
+    assert (control["input_tokens"], control["output_tokens"]) == (9000, 2250)
+    assert baseline["input_tokens"] is None and baseline["correct"] is None
+    assert "100.0% (36/36)" in shown and "9,000/2,250" in shown and "22.5초" in shown
+    assert "합계 mock-reader: 시간 45.0초, 토큰 입력 18,000 출력 4,500" in shown
+    assert record_refusal(report) is not None  # 모의 모델이라 기록은 안 되지만 형식은 맞다.
+
+
+def test_a_report_written_before_these_fields_still_formats(tmp_path: Path) -> None:
+    report = control_report()
+    for row in report["results"]:
+        for key in ("correct", "scored", "decoy_hits", "seconds", "input_tokens", "output_tokens"):
+            row.pop(key, None)
+    path = write_report(report, tmp_path)
+
+    shown = format_report(load_report(path))
+
+    assert "100.0%" in shown and "(" not in shown.split("모델         ")[-1].splitlines()[2]
+    assert "합계" not in shown

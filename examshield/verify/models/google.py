@@ -3,8 +3,8 @@ from typing import Any
 from examshield.auth.keys import FoundKey
 from examshield.errors import ModelAbortError, ModelUnavailableError
 from examshield.providers import get_provider
-from examshield.verify.models.base import FILE, IMAGE, ModelReply, PageInput
-from examshield.verify.models.cloud import REFUSED, CloudModel, abort_reason, prompt_for, reply_from
+from examshield.verify.models.base import FILE, IMAGE, ModelReply, PageInput, token_counts
+from examshield.verify.models.cloud import CloudModel, abort_reason, prompt_for, refused, reply_from
 
 FATAL_CODES = (401, 403, 404)
 BLOCKED_REASONS = ("SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII")
@@ -49,14 +49,24 @@ class GoogleModel(CloudModel):
             # 이 SDK는 연결 실패를 HTTP 라이브러리의 예외 그대로 올린다.
             raise ModelUnavailableError("Google에 연결하지 못했다.") from error
         self.saw_version(response.model_version)
+        usage = response.usage_metadata
+        # 생각하는 데 쓴 토큰도 출력으로 청구된다.
+        tokens = (
+            token_counts(
+                usage.prompt_token_count or 0,
+                (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0),
+            )
+            if usage is not None
+            else None
+        )
         feedback = response.prompt_feedback
         if feedback is not None and feedback.block_reason:
-            return REFUSED
+            return refused(tokens)
         text = response.text or ""
         if not text and any(
             str(getattr(candidate.finish_reason, "name", candidate.finish_reason))
             in BLOCKED_REASONS
             for candidate in response.candidates or []
         ):
-            return REFUSED
-        return reply_from(text, page)
+            return refused(tokens)
+        return reply_from(text, page, tokens)

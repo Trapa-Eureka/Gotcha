@@ -3,12 +3,12 @@ from typing import Any
 from examshield.auth.keys import FoundKey
 from examshield.errors import ModelAbortError, ModelUnavailableError
 from examshield.providers import get_provider
-from examshield.verify.models.base import FILE, IMAGE, ModelReply, PageInput
+from examshield.verify.models.base import FILE, IMAGE, ModelReply, PageInput, token_counts
 from examshield.verify.models.cloud import (
-    REFUSED,
     CloudModel,
     b64,
     prompt_for,
+    refused,
     reply_from,
 )
 from examshield.verify.models.cloud import (
@@ -59,10 +59,14 @@ class OpenAIModel(CloudModel):
         except sdk.APIConnectionError as error:
             raise ModelUnavailableError("OpenAI에 연결하지 못했다.") from error
         self.saw_version(response.model)
+        usage = response.usage
+        tokens = (
+            token_counts(usage.input_tokens, usage.output_tokens) if usage is not None else None
+        )
         text = response.output_text
         if not text and _refused(response):
-            return REFUSED
-        return reply_from(text, page)
+            return refused(tokens)
+        return reply_from(text, page, tokens)
 
 
 def _refused(response: Any) -> bool:

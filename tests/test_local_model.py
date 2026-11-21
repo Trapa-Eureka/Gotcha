@@ -43,7 +43,9 @@ class FakeOllama(BaseHTTPRequestHandler):
             self._send(shown)
             return
         type(self).requests.append(body)
-        self._send({"response": "1. 문제\n① 가 ② 나\n정답: 2"})
+        self._send(
+            {"response": "1. 문제\n① 가 ② 나\n정답: 2", "prompt_eval_count": 88, "eval_count": 21}
+        )
 
 
 @pytest.fixture
@@ -69,6 +71,7 @@ def test_model_name_version_and_channels_come_from_the_server(fake_ollama: str) 
 
 def test_image_channel_sends_the_image_and_parses_the_reply(fake_ollama: str) -> None:
     reply = OllamaModel(base_url=fake_ollama).run(PAGE, IMAGE)
+    assert reply.tokens == (88, 21)
     sent = FakeOllama.requests[-1]
 
     assert sent["images"] == [base64.b64encode(PAGE.image_png).decode()]

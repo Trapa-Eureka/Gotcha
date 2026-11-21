@@ -1,5 +1,6 @@
 import base64
 import os
+from dataclasses import replace
 from urllib.parse import urlsplit
 
 from examshield.auth.keys import FoundKey
@@ -33,8 +34,13 @@ def b64(data: bytes) -> str:
     return base64.standard_b64encode(data).decode("ascii")
 
 
-def reply_from(text: str, page: PageInput) -> ModelReply:
-    return read_reply(text, page)
+def reply_from(text: str, page: PageInput, tokens: tuple[int, int] | None = None) -> ModelReply:
+    return read_reply(text, page, tokens)
+
+
+def refused(tokens: tuple[int, int] | None = None) -> ModelReply:
+    """거부한 호출. 거부해도 토큰은 쓴다."""
+    return replace(REFUSED, tokens=tokens)
 
 
 def abort_reason(company: str, status: int) -> str:
@@ -83,4 +89,4 @@ class CloudModel:
             self._version = str(version)
 
 
-__all__ = ["CHANNELS", "FILE", "IMAGE", "REFUSED", "TEXT", "CloudModel"]
+__all__ = ["CHANNELS", "FILE", "IMAGE", "REFUSED", "TEXT", "CloudModel", "refused"]

@@ -3,12 +3,12 @@ from typing import Any
 from examshield.auth.keys import FoundKey
 from examshield.errors import ModelAbortError, ModelUnavailableError
 from examshield.providers import get_provider
-from examshield.verify.models.base import FILE, IMAGE, ModelReply, PageInput
+from examshield.verify.models.base import FILE, IMAGE, ModelReply, PageInput, token_counts
 from examshield.verify.models.cloud import (
-    REFUSED,
     CloudModel,
     b64,
     prompt_for,
+    refused,
     reply_from,
 )
 from examshield.verify.models.cloud import (
@@ -57,7 +57,9 @@ class AnthropicModel(CloudModel):
         except sdk.APIConnectionError as error:
             raise ModelUnavailableError("Anthropic에 연결하지 못했다.") from error
         self.saw_version(response.model)
+        usage = response.usage
+        tokens = token_counts(usage.input_tokens, usage.output_tokens)
         if response.stop_reason == "refusal":
-            return REFUSED
+            return refused(tokens)
         text = "".join(block.text for block in response.content if block.type == "text")
-        return reply_from(text, page)
+        return reply_from(text, page, tokens)

@@ -47,6 +47,10 @@ class ModelReply:
     answers: dict[int, int] = field(default_factory=dict)
     # 모델이 돌려준 글 그대로. verify --keep-replies로 남길 때만 쓴다.
     raw: str = ""
+    # 이 호출에 쓴 토큰 (입력, 출력). 알려 주지 않는 모델은 None.
+    tokens: tuple[int, int] | None = None
+    # 이 호출에 걸린 시간(초). 받아 둔 응답을 다시 쓸 때 원래 걸린 시간을 전하려고 둔다.
+    seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -66,7 +70,16 @@ class ModelClient(Protocol):
     def run(self, page: PageInput, channel: str) -> ModelReply: ...
 
 
-def read_reply(text: str, page: PageInput) -> ModelReply:
+def token_counts(given: object, produced: object) -> tuple[int, int] | None:
+    """응답에 적혀 온 토큰 수. 숫자가 아니면 모르는 것으로 둔다."""
+    if isinstance(given, bool) or isinstance(produced, bool):
+        return None
+    if not isinstance(given, int) or not isinstance(produced, int):
+        return None
+    return (given, produced) if given >= 0 and produced >= 0 else None
+
+
+def read_reply(text: str, page: PageInput, tokens: tuple[int, int] | None = None) -> ModelReply:
     """모델이 돌려준 글에서 옮겨 적은 글자와 답을 나눠 읽는다."""
     if page.questions:
         return ModelReply(
@@ -74,9 +87,11 @@ def read_reply(text: str, page: PageInput) -> ModelReply:
             answer=None,
             answers=parse_answers(text, page.questions, page.choice_count),
             raw=text,
+            tokens=tokens,
         )
     return ModelReply(
         transcription=strip_answer_line(text),
         answer=parse_answer(text, page.choice_count),
         raw=text,
+        tokens=tokens,
     )

@@ -1,4 +1,5 @@
 import hashlib
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -362,12 +363,20 @@ def _measure(
     lured: list[float] = []
     errors = 0
     refusals = 0
+    seconds = 0.0
+    tokens: list[tuple[int, int]] = []
     for index, (page, truth) in enumerate(zip(inputs, subject.truths, strict=True)):
+        began = time.perf_counter()
         try:
             reply = model.run(page, channel)
         except ModelUnavailableError:
+            seconds += time.perf_counter() - began
             errors += 1
             continue
+        # 받아 둔 응답을 다시 쓴 호출은 처음 받을 때 걸린 시간을 센다.
+        seconds += reply.seconds if reply.seconds is not None else time.perf_counter() - began
+        if reply.tokens is not None:
+            tokens.append(reply.tokens)
         refusals += 1 if reply.refused else 0
         scores.append(legibility(reply.transcription, truth.text))
         if kept is not None:
@@ -398,6 +407,15 @@ def _measure(
         "refusals": refusals,
         "legibility": mean(scores),
         "accuracy": mean(correct) if model.info.solves else None,
+        # 정답률과 미끼 적중률의 분자와 분모. 문항이 적으면 비율만 봐서는 크기를 알 수 없다.
+        "correct": int(sum(correct)) if model.info.solves and correct else None,
+        "scored": len(correct) if model.info.solves and correct else None,
         "decoy_hit_rate": mean(lured) if model.info.solves and decoys is not None else None,
+        "decoy_hits": int(sum(lured)) if model.info.solves and decoys is not None else None,
         "decoy_items": len(lured) if decoys is not None else None,
+        "seconds": round(seconds, 1),
+        # 토큰 수를 알려 준 호출만 더한다. 하나도 없으면 None.
+        "input_tokens": sum(pair[0] for pair in tokens) if tokens else None,
+        "output_tokens": sum(pair[1] for pair in tokens) if tokens else None,
+        "token_calls": len(tokens),
     }

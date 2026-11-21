@@ -88,6 +88,9 @@ def format_report(report: dict[str, Any]) -> str:
         if model.get("note"):
             lines.append(f"      {model['note']}")
     lines += ["", _table(report["results"])]
+    totals = _totals(report["results"])
+    if totals:
+        lines.append(totals)
     for entry in report.get("skipped") or []:
         lines.append(f"건너뜀: {entry['model']} — {entry['reason']}")
     for note in report.get("notes") or []:
@@ -102,7 +105,17 @@ def _simulation(conditions: dict[str, Any] | None) -> str:
 
 
 def _table(results: list[dict[str, Any]]) -> str:
-    header = ("모델", "경로", "구분", "글자 판독률", "정답률", "미끼 적중률", "오류")
+    header = (
+        "모델",
+        "경로",
+        "구분",
+        "글자 판독률",
+        "정답률",
+        "미끼 적중률",
+        "오류",
+        "시간",
+        "토큰(입력/출력)",
+    )
     rows = [header]
     for row in results:
         rows.append(
@@ -111,9 +124,11 @@ def _table(results: list[dict[str, Any]]) -> str:
                 CHANNEL_LABELS.get(row["channel"], str(row["channel"])),
                 VARIANT_LABELS.get(row["variant"], str(row["variant"])),
                 _percent(row["legibility"]),
-                _percent(row["accuracy"]),
-                _percent(row["decoy_hit_rate"]),
+                _share(row["accuracy"], row.get("correct"), row.get("scored")),
+                _share(row["decoy_hit_rate"], row.get("decoy_hits"), row.get("decoy_items")),
                 str(row["errors"]),
+                _seconds(row.get("seconds")),
+                _tokens(row.get("input_tokens"), row.get("output_tokens")),
             )
         )
     widths = [max(display_width(row[i]) for row in rows) for i in range(len(header))]
@@ -123,6 +138,44 @@ def _table(results: list[dict[str, Any]]) -> str:
         ).rstrip()
         for row in rows
     )
+
+
+def _share(rate: float | None, hits: int | None, total: int | None) -> str:
+    """비율 옆에 몇 문항 중 몇 문항인지 적는다. 예전 리포트에는 문항 수가 없다."""
+    if rate is None or hits is None or total is None:
+        return _percent(rate)
+    return f"{_percent(rate)} ({hits}/{total})"
+
+
+def _seconds(value: float | None) -> str:
+    if value is None:
+        return "-"
+    if value < 60:
+        return f"{value:.1f}초"
+    return f"{int(value) // 60}분 {int(value) % 60}초"
+
+
+def _tokens(given: int | None, produced: int | None) -> str:
+    if given is None or produced is None:
+        return "-"
+    return f"{given:,}/{produced:,}"
+
+
+def _totals(results: list[dict[str, Any]]) -> str | None:
+    """모델별로 걸린 시간과 쓴 토큰의 합. 요금은 회사와 모델마다 달라서 계산하지 않는다."""
+    lines = []
+    for model in dict.fromkeys(str(row["model"]) for row in results):
+        mine = [row for row in results if row["model"] == model]
+        if not any(row.get("seconds") is not None for row in mine):
+            continue
+        text = f"합계 {model}: 시간 {_seconds(sum(row.get('seconds') or 0.0 for row in mine))}"
+        counted = [row for row in mine if row.get("input_tokens") is not None]
+        if counted:
+            given = sum(row["input_tokens"] for row in counted)
+            produced = sum(row["output_tokens"] or 0 for row in counted)
+            text += f", 토큰 입력 {given:,} 출력 {produced:,}"
+        lines.append(text)
+    return "\n".join(lines) if lines else None
 
 
 def _percent(value: float | None) -> str:

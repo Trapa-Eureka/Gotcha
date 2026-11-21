@@ -6,12 +6,20 @@
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from examshield.verify.models.base import ModelClient, ModelInfo, ModelReply, PageInput, prompt_of
+from examshield.verify.models.base import (
+    ModelClient,
+    ModelInfo,
+    ModelReply,
+    PageInput,
+    prompt_of,
+    token_counts,
+)
 
 # 오래된 응답을 오늘 잰 것처럼 쓰지 않는다. 모델은 예고 없이 바뀐다.
 MAX_AGE = timedelta(hours=24)
@@ -114,9 +122,13 @@ class Tracked:
                     refused=bool(kept["refused"]),
                     answers={int(number): int(given) for number, given in kept["answers"].items()},
                     raw=str(kept["raw"]),
+                    tokens=token_counts(*pair) if (pair := kept.get("tokens")) else None,
+                    seconds=float(kept.get("seconds") or 0.0),
                 )
             # 실패한 호출은 적지 않는다. 이어 할 때 다시 한다.
+            began = time.perf_counter()
             reply = self.model.run(page, channel)
+            taken = time.perf_counter() - began
             self._checkpoint.put(
                 key,
                 {
@@ -128,6 +140,8 @@ class Tracked:
                     "refused": reply.refused,
                     "answers": {str(number): given for number, given in reply.answers.items()},
                     "raw": reply.raw,
+                    "tokens": list(reply.tokens) if reply.tokens is not None else None,
+                    "seconds": round(taken, 3),
                 },
             )
             return reply

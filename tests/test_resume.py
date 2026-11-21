@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -243,7 +244,9 @@ def test_answers_already_received_are_not_asked_for_again(tmp_path: Path) -> Non
     # 실패했던 호출 하나만 다시 했다.
     assert second.calls == 1 and resumed.reused == 4
     assert [reply.answer for reply in again] == [item.answer for item in load_items().items[:5]]
-    assert again[0] == replies[0]
+    # 다시 쓴 응답은 처음 받을 때 걸린 시간을 함께 전한다.
+    assert again[0].seconds is not None
+    assert replace(again[0], seconds=None) == replies[0]
 
 
 def test_old_answers_and_a_fresh_start_are_not_reused(tmp_path: Path) -> None:

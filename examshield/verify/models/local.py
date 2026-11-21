@@ -16,6 +16,7 @@ from examshield.verify.models.base import (
     PageInput,
     prompt_of,
     read_reply,
+    token_counts,
 )
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
@@ -91,8 +92,9 @@ class OllamaModel:
             body["images"] = [base64.b64encode(page.image_png).decode("ascii")]
         else:
             body["prompt"] = f"{prompt_of(page)}\n\n---\n{page.text}"
-        reply = str(self._call("POST", "/api/generate", body).get("response", ""))
-        return read_reply(reply, page)
+        answer = self._call("POST", "/api/generate", body)
+        tokens = token_counts(answer.get("prompt_eval_count"), answer.get("eval_count"))
+        return read_reply(str(answer.get("response", "")), page, tokens)
 
     def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         url = self._base_url + path
