@@ -22,6 +22,7 @@ from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
 from examshield.protect.copies import (
     check_seed,
+    choose_jobs,
     keyed_technique,
     map_row,
     protect_copies,
@@ -557,6 +558,11 @@ def protect(
         "--map-file",
         help="수험번호 매핑표를 쓸 곳. 기본값 secrets/<이름>.watermark-map.csv. 출력 폴더 안은 안 된다.",
     ),
+    jobs: int | None = typer.Option(
+        None,
+        "--jobs",
+        help="--copies에서 복사본을 만들 프로세스 수. 없으면 코어 수와 복사본 수를 보고 고른다. 1이면 하나씩 만든다.",
+    ),
 ) -> None:
     failed = 0
     loaded: Profile | None = None
@@ -572,10 +578,12 @@ def protect(
                 raise ExamShieldError(f"정답표를 출력 폴더 안에 둘 수 없다: {answer_key}")
             answers = read_answer_key(answer_key)
         if copies is not None:
-            _protect_copies(sources, out, loaded, seed_file, force, copies, map_file, answers)
+            _protect_copies(sources, out, loaded, seed_file, force, copies, map_file, answers, jobs)
             return
         if map_file is not None:
             raise ExamShieldError("--map-file은 --copies와 함께 쓴다.")
+        if jobs is not None:
+            raise ExamShieldError("--jobs는 --copies와 함께 쓴다.")
         if out.exists() and not out.is_dir():
             raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
         # 대소문자나 유니코드 정규화만 다른 경로도 같은 폴더로 잡으려고 samefile로 비교한다.
@@ -663,6 +671,7 @@ def _protect_copies(
     copies: Path,
     map_file: Path | None,
     answers: AnswerKey | None = None,
+    jobs: int | None = None,
 ) -> None:
     if len(sources) != 1:
         raise ExamShieldError("--copies는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
@@ -672,6 +681,7 @@ def _protect_copies(
         raise ExamShieldError(f"시드 파일을 찾지 못했다: {seed_file}")
     seed = check_seed(seed_file.read_bytes() if seed_file is not None else None)
     ids = read_examinee_ids(copies)
+    choose_jobs(jobs, len(ids))
     if out.exists() and not out.is_dir():
         raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
     if out.is_dir() and out.samefile(source.parent):
@@ -707,7 +717,7 @@ def _protect_copies(
     engine = find_tesseract()
     original = read_document(source, out)
     base_check, made = protect_copies(
-        original, profile, seed, ids, engine.read if engine else None, answers
+        original, profile, seed, ids, engine.read if engine else None, answers, jobs
     )
     if not base_check.passed:
         typer.echo(f"{source.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
