@@ -1,8 +1,13 @@
+from pathlib import Path
+
 import pymupdf
+import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from typer.testing import CliRunner
 
 from examshield.check.compare import compare
+from examshield.cli import app
 from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import load_profile
 from examshield.protect.pipeline import protect_bytes
@@ -123,3 +128,85 @@ def test_mixed_code_lengths_get_one_codespace_range_each() -> None:
 
     assert b"2 begincodespacerange\n<00> <FF>\n<0000> <FFFF>\n" in built
     assert parse_tounicode(built) == mapping
+
+
+def two_font_pdf(first: str, second: str) -> bytes:
+    import pymupdf  # noqa: PLC0415
+
+    from examshield.pdfio import save_deterministic  # noqa: PLC0415
+
+    doc = pymupdf.open()
+    page = doc.new_page()
+    buffer = pymupdf.Font("korea").buffer
+    page.insert_font(fontname="one", fontbuffer=buffer)
+    page.insert_text((60, 100), first, fontname="one", fontsize=11)
+    other = doc.new_page()
+    if second.isascii():
+        other.insert_text((60, 100), second, fontname="helv", fontsize=11)
+    else:
+        other.insert_font(fontname="two", fontbuffer=buffer)
+        other.insert_text((60, 100), second, fontname="two", fontsize=11)
+    return save_deterministic(doc)
+
+
+def test_hanja_jamo_and_circled_hangul_are_scrambled_too() -> None:
+    """실제 시험지에서 그대로 읽히던 글자들이다."""
+    from examshield.pdfio import open_pdf_bytes, page_text  # noqa: PLC0415
+
+    text = "韓國語 文字 大學 ㄱㄴㄷㄹ ㉠㉡㉢㉣ 가나다라"
+    pdf = two_font_pdf(text, text)
+
+    made = protect_bytes(pdf, load_profile("a-glyph-remap"))
+    after = page_text(open_pdf_bytes(made.pdf)[0])
+
+    kept = [left for left, right in zip(text, after, strict=False) if left == right and left != " "]
+    assert kept == []
+    # 종류 안에서만 바꾼다. 한자는 한자로, 자모는 자모로.
+    assert all("一" <= char <= "鿿" for char in after[:3])
+    assert made.record["text_layer_letter_similarity"] == 0.0
+
+
+def test_similarity_over_letters_ignores_spaces_punctuation_and_the_decoy() -> None:
+    from examshield.protect.pipeline import letters_kept, letters_only  # noqa: PLC0415
+
+    assert letters_only("1. 다음 중, 옳은 것은? (3점)") == "1다음중옳은것은3점"
+    assert letters_kept("가나 다라.", "가마 다바.") == 0.5
+    assert letters_kept("가나 다라.", "미끼 문구 가나 다라.", "미끼 문구") == 1.0
+    assert letters_kept("가나다라", "가나") < 1.0
+
+
+def test_cli_shows_the_share_of_letters_still_readable(sample_file: Path, tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["protect", str(sample_file), "--out", str(tmp_path / "o"), "--profile", "a-remap-decoy"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "공백과 문장부호를 빼면" in result.output
+    assert "그대로 읽힌다" not in result.output
+
+
+def test_cli_warns_when_most_letters_survive_the_scrambling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """글자 대응표를 읽어 내지 못한 글꼴의 글자는 그대로 남는다. 그런 글자가 많으면 알린다."""
+    folder = tmp_path / "in"
+    folder.mkdir()
+    (folder / "exam.pdf").write_bytes(two_font_pdf("가나다라", "plain words stay " * 6))
+    # 대응표가 없는 글꼴(둘째 쪽)을 조사해도 아무것도 얻지 못한 경우를 흉내 낸다.
+    monkeypatch.setattr("examshield.protect.techniques.glyph_remap.probe_font", lambda *_: {})
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "protect",
+            str(folder / "exam.pdf"),
+            "--out",
+            str(tmp_path / "o"),
+            "--profile",
+            "a-glyph-remap",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "그대로 읽힌다" in result.output and "효과가 약하다" in result.output

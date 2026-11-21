@@ -2,6 +2,7 @@ import csv
 import hashlib
 import io
 import json
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -133,6 +134,25 @@ class Protected:
     decoy_items: tuple[tuple[int, int | None, int], ...] | None = None
 
 
+def letters_only(text: str) -> str:
+    """글자와 숫자만 남긴 글. 공백, 문장부호, 기호를 뺀다."""
+    return "".join(char for char in text if unicodedata.category(char)[0] in "LN")
+
+
+def letters_kept(before: str, after: str, decoy: str = "") -> float:
+    """원문의 글자와 숫자 가운데 복사본에서 같은 자리에 그대로 읽히는 비율.
+
+    글자 바꾸기는 글자를 하나씩 다른 글자로 바꾸므로 글자 수가 같다. 그때는 자리끼리 견준다.
+    글자 수가 달라졌으면(이미지화, 미끼 문구) 글 전체의 닮은 정도로 본다.
+    """
+    left, right = letters_only(before), letters_only(after)
+    # 숨은 미끼 문구는 원문에 없던 글이다. 빼고 견준다.
+    right = right.replace(letters_only(decoy), "", 1) if decoy else right
+    if len(left) == len(right):
+        return sum(1 for a, b in zip(left, right, strict=True) if a == b) / len(left)
+    return legibility(right, left)
+
+
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -231,6 +251,16 @@ def protect_bytes(
     similarity = mean(
         [legibility(after, before) for before, after in zip(originals, copies, strict=True)]
     )
+    # 공백과 문장부호는 어떤 기법도 바꾸지 않아서, 위의 값은 글자를 모두 바꿔도 10~20%가 남는다.
+    # 글자와 숫자만 놓고 본 값을 따로 적는다. 글자가 없는 쪽은 세지 않는다.
+    hidden = decoy_texts or ("",) * len(copies)
+    letter_similarity = mean(
+        [
+            letters_kept(before, after, decoy)
+            for before, after, decoy in zip(originals, copies, hidden, strict=True)
+            if letters_only(before)
+        ]
+    )
     record: dict[str, Any] = {
         "schema": JOB_SCHEMA,
         "tool_version": __version__,
@@ -243,6 +273,9 @@ def protect_bytes(
         "pages": len(originals),
         "techniques": applied,
         "text_layer_similarity": round(similarity or 0.0, 4),
+        "text_layer_letter_similarity": (
+            round(letter_similarity, 4) if letter_similarity is not None else None
+        ),
         "expect": expectation.as_dict(),
         "decoy_answers": list(decoy_answers) if decoy_answers is not None else None,
         "decoy_items": decoy_items_record(decoy_items),

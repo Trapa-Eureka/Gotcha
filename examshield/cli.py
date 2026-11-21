@@ -13,7 +13,7 @@ import typer
 from examshield import __version__
 from examshield.auth.keys import delete_key, find_key, setup_help, store_key, usable
 from examshield.benchmark import load_items
-from examshield.check.compare import Expectation, compare, format_result
+from examshield.check.compare import TEXT_ALTERED, Expectation, compare, format_result
 from examshield.convert import HWP_NOTICE, SUPPORTED_SUFFIXES, needs_review, read_document
 from examshield.errors import ExamShieldError, ModelUnavailableError
 from examshield.netguard import OFFLINE_ENV, offline_enabled
@@ -95,6 +95,9 @@ from examshield.verify.runner import (
     estimate_calls,
     run_verification,
 )
+
+# 글자를 바꾸는 프로파일인데 글자와 숫자가 이만큼 넘게 그대로 읽히면 알린다.
+WEAK_SCRAMBLE = 0.2
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -665,10 +668,22 @@ def protect(
                 continue
             written = write_outputs(protected, out, path.stem)
             similarity = protected.record["text_layer_similarity"]
+            letters = protected.record.get("text_layer_letter_similarity")
+            detail = "" if letters is None else f" (공백과 문장부호를 빼면 {letters:.1%})"
             typer.echo(
                 f"{path.name} → {written}  검사 통과, "
-                f"추출 텍스트가 원문과 일치하는 정도 {similarity:.1%}"
+                f"추출 텍스트가 원문과 일치하는 정도 {similarity:.1%}{detail}"
             )
+            if (
+                letters is not None
+                and letters > WEAK_SCRAMBLE
+                and protected.expectation.text == TEXT_ALTERED
+            ):
+                typer.echo(
+                    f"  주의: 글자를 바꿨는데도 글자와 숫자의 {letters:.0%}가 그대로 읽힌다. "
+                    "이 문서의 글꼴 일부는 바꾸지 못했다. 복사해 붙이기를 막는 효과가 약하다.",
+                    err=True,
+                )
             for note in result.notes:
                 typer.echo(f"  참고: {note}")
             if needs_review(path):

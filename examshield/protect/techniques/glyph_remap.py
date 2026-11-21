@@ -21,6 +21,10 @@ _CLASSES: tuple[tuple[str, int, int], ...] = (
     ("upper", 0x41, 0x5A),
     ("lower", 0x61, 0x7A),
     ("circled", 0x2460, 0x2473),
+    # 아래는 실제 시험지에서 그대로 읽히던 글자다. 뒤에 두어서 앞의 종류가 섞이는 결과는 전과 같다.
+    ("hanja", 0x4E00, 0x9FFF),
+    ("jamo", 0x3131, 0x318E),
+    ("circled_hangul", 0x3260, 0x327F),
 )
 
 
