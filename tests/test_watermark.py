@@ -615,3 +615,37 @@ def test_cli_stops_when_old_copies_would_be_left_out_of_the_new_table(
 
     assert code == 2 and "exam-A003.pdf" in output
     assert [row.examinee_id for row in read_map(workspace["map"])] == ["A001", "A002", "A003"]
+
+
+def test_trace_stops_reading_pages_once_one_names_the_examinee(sample_pdf: bytes) -> None:
+    from collections.abc import Iterator  # noqa: PLC0415
+
+    from examshield.trace import detect  # noqa: PLC0415
+
+    keys = [watermark.derive_key(SEED, examinee) for examinee in IDS]
+    rows, cols = 100, 80
+    rng = np.random.default_rng(3)
+    read: list[int] = []
+
+    def page_of(owner: bytes | None, index: int) -> detect.Evidence:
+        cells = np.arange(rows * cols, dtype=np.intp)
+        if owner is None:
+            values = rng.normal(size=rows * cols)
+        else:
+            marks = watermark.pattern(owner, index, rows, cols).ravel()
+            values = np.where(marks, 1.0, -1.0) + rng.normal(scale=2.0, size=rows * cols)
+        return detect.Evidence(index, rows, cols, cells, values - values.mean())
+
+    def pages(owners: list[bytes | None]) -> Iterator[detect.Evidence]:
+        for index, owner in enumerate(owners):
+            read.append(index)
+            yield page_of(owner, index)
+
+    found = detect._best_page(pages([None, keys[7], None, None]), IDS, keys, "이미지 정합")
+    assert found.found and found.examinee_id == IDS[7] and found.pages == (2,)
+    assert read == [0, 1]
+
+    read.clear()
+    nobody = detect._best_page(pages([None, None, None]), IDS, keys, "이미지 정합")
+    assert not nobody.found and read == [0, 1, 2]
+    assert not detect._best_page(iter(()), IDS, keys, "이미지 정합").found

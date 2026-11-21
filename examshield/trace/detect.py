@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -78,8 +79,9 @@ def trace(
     seed: bytes,
 ) -> TraceResult:
     keys = _keys(rows, seed)
+    digest = sha256_hex(leaked)
     for row in rows:
-        if row.output_sha256 == sha256_hex(leaked):
+        if row.output_sha256 == digest:
             return TraceResult(True, "파일 해시 일치", row.examinee_id, None, None, 0, ())
     sizes = page_sizes(original)
     cell_pt = rows[0].cell_pt
@@ -92,14 +94,27 @@ def trace(
         return _decide(_from_pdf(leaked, reference, sizes, cell_pt), ids, keys, "PDF 렌더링")
     if suffix not in IMAGE_SUFFIXES:
         raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
-    # 내용이 같은 쪽이 여럿이면 어느 쪽인지 그림만으로는 모른다. 맞춰지는 쪽을 모두 재 보고 가장 뚜렷한 것을 쓴다.
-    results = [
-        _decide([found], ids, keys, "이미지 정합")
-        for found in _from_image(leaked, reference, sizes, cell_pt)
-    ]
+    return _best_page(_from_image(leaked, reference, sizes, cell_pt), ids, keys, "이미지 정합")
+
+
+def _best_page(
+    candidates: Iterator[Evidence], ids: list[str], keys: list[bytes], method: str
+) -> TraceResult:
+    """잘 맞는 쪽부터 하나씩 읽어, 수험번호가 뚜렷하게 나오면 거기서 멈춘다.
+
+    내용이 같은 쪽이 여럿이면 어느 쪽인지 그림만으로는 모른다. 그래서 맞춰지는 쪽을 차례로 재 본다.
+    엉뚱한 쪽의 무늬로는 기준을 넘는 점수가 나오지 않으므로, 뚜렷한 답이 나오면 나머지는 재지 않는다.
+    끝까지 뚜렷한 답이 없으면 그중 점수가 가장 높은 것을 돌려준다.
+    """
+    results = []
+    for found in candidates:
+        result = _decide([found], ids, keys, method)
+        if result.found:
+            return result
+        results.append(result)
     if not results:
-        return _decide([], ids, keys, "이미지 정합")
-    return max(results, key=lambda result: (result.found, result.score or 0.0))
+        return _decide([], ids, keys, method)
+    return max(results, key=lambda result: result.score or 0.0)
 
 
 def _keys(rows: list[MapRow], seed: bytes) -> list[bytes]:
@@ -150,36 +165,34 @@ def _trace_dots(
     if suffix not in IMAGE_SUFFIXES:
         raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
     shot = decode_photo(leaked)
-    results = []
     known = features(shot)
+    matched = []
     for index, page in enumerate(reference):
-        matrix = _register_photo(shot, page, known)
-        if matrix is None:
-            continue
-        height, width = page.shape
-        warped = cv2.warpPerspective(shot, matrix, (width, height), flags=cv2.INTER_LINEAR)
-        covered = cv2.warpPerspective(
-            np.full(shot.shape, 255, dtype=np.uint8), matrix, (width, height)
-        )
-        found = _read_dots(
-            np.asarray(warped, dtype=np.uint8),
-            np.asarray(covered) == 255,
-            page,
-            sizes[index],
-            cell_pt,
-            index,
-        )
-        if found is not None:
-            results.append(_decide([found], ids, keys, "사진 정합"))
-    if not results:
-        return _decide([], ids, keys, "사진 정합")
-    return max(results, key=lambda result: (result.found, result.score or 0.0))
+        fit = register(shot, page, known)
+        if fit is not None:
+            matched.append((fit[0], index, fit[1]))
 
+    def read() -> Iterator[Evidence]:
+        # 특징점이 많이 맞은 쪽이 사진에 찍힌 쪽일 가능성이 높다. 그 쪽부터 읽는다.
+        for _, index, matrix in sorted(matched, key=lambda entry: -entry[0]):
+            page = reference[index]
+            height, width = page.shape
+            warped = cv2.warpPerspective(shot, matrix, (width, height), flags=cv2.INTER_LINEAR)
+            covered = cv2.warpPerspective(
+                np.full(shot.shape, 255, dtype=np.uint8), matrix, (width, height)
+            )
+            evidence = _read_dots(
+                np.asarray(warped, dtype=np.uint8),
+                np.asarray(covered) == 255,
+                page,
+                sizes[index],
+                cell_pt,
+                index,
+            )
+            if evidence is not None:
+                yield evidence
 
-def _register_photo(shot: Gray, page: Gray, known: Features) -> Any | None:
-    """사진을 원본 쪽에 맞춘다. 기울기와 원근 왜곡까지 바로잡는다. 종이가 휜 것은 못 잡는다."""
-    found = register(shot, page, known)
-    return None if found is None else found[1]
+    return _best_page(read(), ids, keys, "사진 정합")
 
 
 def _read_dots(
@@ -206,6 +219,8 @@ def _read_dots(
     blank = cv2.erode(usable.astype(np.uint8), np.ones((window, window), dtype=np.uint8)) > 0
     height, width = reference.shape
     reach = int(step // 2)
+    offsets = np.arange(-reach, reach + 1, dtype=np.intp)
+    shifts_y, shifts_x = (grid.ravel() for grid in np.meshgrid(offsets, offsets, indexing="ij"))
     cells: list[NDArray[np.intp]] = []
     values: list[NDArray[np.float64]] = []
     for top in range(0, rows, DOTS_TILE):
@@ -224,17 +239,11 @@ def _read_dots(
             ys, xs, numbers = ys[keep], xs[keep], numbers[keep]
             if len(numbers) < MIN_TILE_CELLS:
                 continue
-            best: NDArray[np.float64] | None = None
-            spread = -1.0
-            for shift_y in range(-reach, reach + 1):
-                for shift_x in range(-reach, reach + 1):
-                    sample = dark[ys + shift_y, xs + shift_x]
-                    variance = float(sample.var())
-                    if variance > spread:
-                        best, spread = sample, variance
-            if best is not None:
-                cells.append(numbers)
-                values.append(best - best.mean())
+            # 옮겨 볼 자리마다 한 줄. 점이 가장 뚜렷한(값이 가장 고르지 않은) 자리를 고른다.
+            samples = dark[ys[None, :] + shifts_y[:, None], xs[None, :] + shifts_x[:, None]]
+            best = samples[int(np.argmax(samples.var(axis=1)))]
+            cells.append(numbers)
+            values.append(best - best.mean())
     if sum(len(entry) for entry in cells) < MIN_CELLS // 4:
         return None
     measured = np.concatenate(values)
@@ -272,22 +281,26 @@ def _from_pdf(
 
 def _from_image(
     leaked: bytes, reference: list[Gray], sizes: list[tuple[float, float]], cell_pt: int
-) -> list[Evidence]:
+) -> Iterator[Evidence]:
+    """캡처가 맞춰지는 쪽마다 읽어 낸 칸. 특징점이 많이 맞은 쪽부터 내놓는다."""
     shot = decode_photo(leaked)
-    evidence = []
+    known = _features(shot)
+    matched = []
     for index, page in enumerate(reference):
-        matched = _register(shot, page)
-        if matched is None:
-            continue
+        found = _register(known, page)
+        if found is not None:
+            matched.append((found[0], index, found[1]))
+    for _, index, transform in sorted(matched, key=lambda entry: -entry[0]):
+        page = reference[index]
         height, width = page.shape
-        warped = cv2.warpAffine(shot, matched[1], (width, height), flags=cv2.INTER_LINEAR)
+        warped = cv2.warpAffine(shot, transform, (width, height), flags=cv2.INTER_LINEAR)
         covered = cv2.warpAffine(
             np.full(shot.shape, 255, dtype=np.uint8),
-            matched[1],
+            transform,
             (width, height),
             flags=cv2.INTER_LINEAR,
         )
-        found = _read_cells(
+        found_cells = _read_cells(
             np.asarray(warped, dtype=np.uint8),
             np.asarray(covered) == 255,
             page,
@@ -295,16 +308,23 @@ def _from_image(
             cell_pt,
             index,
         )
-        if found is not None:
-            evidence.append(found)
-    return evidence
+        if found_cells is not None:
+            yield found_cells
 
 
-def _register(shot: Gray, page: Gray) -> tuple[int, Any] | None:
-    """화면 캡처를 원본 쪽에 맞춘다. 이동, 확대·축소, 회전만 다룬다. 원근 왜곡(사진)은 다루지 않는다."""
+def _features(image: Gray) -> Features:
     sift = getattr(cv2, "SIFT_create")(nfeatures=6000)  # noqa: B009 (cv2 타입 정보에 없다)
-    shot_points, shot_features = sift.detectAndCompute(shot, None)
-    page_points, page_features = sift.detectAndCompute(page, None)
+    points, described = sift.detectAndCompute(image, None)
+    return points, described
+
+
+def _register(shot: Features, page: Gray) -> tuple[int, Any] | None:
+    """화면 캡처를 원본 쪽에 맞춘다. 이동, 확대·축소, 회전만 다룬다. 원근 왜곡(사진)은 다루지 않는다.
+
+    캡처의 특징점은 한 번만 구해서 쪽마다 돌려쓴다.
+    """
+    shot_points, shot_features = shot
+    page_points, page_features = _features(page)
     if shot_features is None or page_features is None or len(shot_points) < MIN_INLIERS:
         return None
     pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(shot_features, page_features, k=2)
