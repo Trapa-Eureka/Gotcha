@@ -325,24 +325,71 @@ def _looks_like_watermark(
     if cell is None:
         return False
     strength = expect.pixel_tolerance - WATERMARK_SLACK
-    light = before.min(axis=2)
-    darker = light.astype(np.float64) - after.min(axis=2).astype(np.float64)
+    light = _darkest_channel(before)
+    darker = light.astype(np.int16) - _darkest_channel(after).astype(np.int16)
     step = cell * dpi / 72.0
     inset = step * 0.25
     height, width = light.shape
-    for row in range(int(height / step)):
-        top, bottom = round(row * step + inset), round((row + 1) * step - inset)
-        for col in range(int(width / step)):
-            left, right = round(col * step + inset), round((col + 1) * step - inset)
-            if bottom <= top or right <= left or int(np.min(light[top:bottom, left:right])) < 250:
-                continue
-            patch = darker[top:bottom, left:right]
-            level = float(np.mean(patch))
-            if float(np.max(patch) - np.min(patch)) > 1.0:
-                return False
-            if abs(level) > 1.0 and abs(level - strength) > 1.5:
-                return False
-    return True
+    rows = _cell_edges(int(height / step), step, inset, height)
+    cols = _cell_edges(int(width / step), step, inset, width)
+    if rows is None or cols is None:
+        return True
+    # 칸마다 가장 밝지 않은 값, 어두워진 정도의 최소·최대·평균을 한꺼번에 구한다.
+    # 수험번호가 수백 개면 이 검사가 복사본마다 돌아서, 칸마다 파이썬으로 돌면 느리다.
+    blank = _per_cell(np.minimum, light, rows, cols) >= 250
+    low = _per_cell(np.minimum, darker, rows, cols)
+    high = _per_cell(np.maximum, darker, rows, cols)
+    total = _per_cell(np.add, darker.astype(np.int64), rows, cols)
+    level = total / (rows.sizes[:, None] * cols.sizes[None, :])
+    uneven = (high - low) > 1
+    off_level = (np.abs(level) > 1.0) & (np.abs(level - strength) > 1.5)
+    return not bool(np.any(blank & (uneven | off_level)))
+
+
+@dataclass(frozen=True)
+class _Edges:
+    # 칸마다 [시작, 끝) 픽셀. cuts는 reduceat에 줄 경계(시작0, 끝0, 시작1, 끝1, ...)다.
+    cuts: NDArray[np.intp]
+    sizes: NDArray[np.int64]
+
+
+def _cell_edges(count: int, step: float, inset: float, limit: int) -> _Edges | None:
+    """칸의 가장자리 4분의 1씩을 뺀 안쪽 구간들. 칸이 없거나 구간이 비면 None."""
+    index = np.arange(count)
+    # 파이썬의 round와 같게 반올림한다(반은 짝수 쪽으로).
+    starts = np.rint(index * step + inset).astype(np.intp)
+    ends = np.rint((index + 1) * step - inset).astype(np.intp)
+    ends = np.minimum(ends, limit)
+    keep = ends > starts
+    starts, ends = starts[keep], ends[keep]
+    if starts.size == 0:
+        return None
+    cuts = np.column_stack([starts, ends]).ravel()
+    return _Edges(cuts=cuts, sizes=(ends - starts).astype(np.int64))
+
+
+def _per_cell(operation: Any, values: NDArray[Any], rows: _Edges, cols: _Edges) -> NDArray[Any]:
+    """칸마다 operation으로 줄인 값. 칸 사이의 띠는 버린다."""
+    reduced = _reduce(operation, values, rows.cuts, 0, values.shape[0])
+    result: NDArray[Any] = _reduce(operation, reduced, cols.cuts, 1, values.shape[1])
+    return result
+
+
+def _reduce(
+    operation: Any, values: NDArray[Any], cuts: NDArray[np.intp], axis: int, limit: int
+) -> NDArray[Any]:
+    # reduceat은 경계가 배열 끝과 같으면 받지 않는다. 마지막 구간은 어차피 끝까지다.
+    usable = cuts[:-1] if cuts[-1] >= limit else cuts
+    pieces: NDArray[Any] = operation.reduceat(values, usable, axis=axis)
+    return pieces[::2] if axis == 0 else pieces[:, ::2]
+
+
+def _darkest_channel(image: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """화소마다 세 채널 가운데 가장 어두운 값. image.min(axis=2)보다 빠르다."""
+    result: NDArray[np.uint8] = np.minimum(
+        np.minimum(image[:, :, 0], image[:, :, 1]), image[:, :, 2]
+    )
+    return result
 
 
 def _same_text(before: str, after: str, decoy: str) -> bool:
