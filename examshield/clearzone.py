@@ -76,3 +76,19 @@ def stats(clear_pt: int, opened: int, total: int) -> dict[str, Any]:
         "open_cells": opened,
         "open_share": round(opened / total, 4) if total else 0.0,
     }
+
+
+# trace가 수험번호를 가리는 데 쓰는 빈 바탕 칸의 최소 수. trace/detect.py의 MIN_CELLS와 같은 값이다.
+TRACE_MIN_CELLS = 300
+# 쪽의 절반쯤만 나온 그림으로도 그 수를 채우려면 쪽에 이만큼은 있어야 한다.
+THIN_PAGE_CELLS = 2 * TRACE_MIN_CELLS
+
+
+def blank_cells(doc: Any, cell_pt: int) -> list[int]:
+    """쪽마다 내용이 없는 무늬 칸의 수. trace는 이런 칸에서만 무늬를 읽는다."""
+    counts = []
+    for page in doc:
+        rows = math.ceil(page.rect.height / cell_pt)
+        cols = math.ceil(page.rect.width / cell_pt)
+        counts.append(int((~busy_cells(page, cell_pt, rows, cols)).sum()))
+    return counts

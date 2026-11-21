@@ -20,7 +20,7 @@ from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
 from examshield.progress import Progress
-from examshield.protect.batch import CopiesFailed, inside, low_vision_lines, make_copies
+from examshield.protect.batch import CopiesFailed, inside, make_copies, notice_lines
 from examshield.protect.copies import (
     check_seed,
     keyed_technique,
@@ -808,7 +808,7 @@ def _protect_copies(
     typer.echo(
         f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개). 목록의 제목 줄이 번호로 읽히지 않았는지 확인한다."
     )
-    for line in low_vision_lines(batch):
+    for line in notice_lines(batch):
         typer.echo(line)
     typer.echo(f"매핑표: {batch.table}")
     typer.echo("매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.")

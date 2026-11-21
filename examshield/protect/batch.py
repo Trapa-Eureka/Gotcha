@@ -8,9 +8,12 @@ from datetime import datetime
 from pathlib import Path
 
 from examshield.check.compare import Ocr, format_result
+from examshield.clearzone import THIN_PAGE_CELLS, TRACE_MIN_CELLS, blank_cells
 from examshield.errors import ExamShieldError
+from examshield.pdfio import open_pdf_bytes
 from examshield.profiles import Profile
 from examshield.protect.copies import (
+    DOTS,
     MapRow,
     append_map,
     check_seed,
@@ -22,6 +25,7 @@ from examshield.protect.copies import (
     write_map,
 )
 from examshield.protect.pipeline import AnswerKey, append_log, job_path, write_outputs
+from examshield.protect.techniques import dots, watermark
 
 
 class CopiesFailed(ExamShieldError):
@@ -41,6 +45,10 @@ class Batch:
     # 저시력 수험생용으로 만든 복사본 수와, 그 복사본들에서 무늬를 넣을 수 있었던 칸의 비율(가장 낮은 값).
     low_vision: int = 0
     open_share: float | None = None
+    # 빈 바탕이 적어 그림 한 장으로는 추적하기 어려운 쪽(1부터 센다)과 전체 쪽수, 문서 전체의 빈 칸 수.
+    thin_pages: tuple[int, ...] = ()
+    pages: int = 0
+    blank_cells: int = 0
 
 
 def inside(path: Path, folder: Path) -> bool:
@@ -124,6 +132,9 @@ def make_copies(
             + ", ".join(stale[:5])
         )
     original = load()
+    kind, params = keyed_technique(profile)
+    cell_pt = (dots if kind == DOTS else watermark).read_params(params)[0]
+    blank = blank_cells(open_pdf_bytes(original), cell_pt)
     kept = (
         reusable_rows(table, out, stem, ids, seed, original, profile, answers is not None, low)
         if resume
@@ -165,6 +176,11 @@ def make_copies(
         made=len(todo),
         low_vision=sum(1 for row in rows if row.clear_pt),
         open_share=min(shares) if shares else None,
+        thin_pages=tuple(
+            number for number, count in enumerate(blank, start=1) if count < THIN_PAGE_CELLS
+        ),
+        pages=len(blank),
+        blank_cells=sum(blank),
     )
 
 
@@ -187,3 +203,29 @@ def low_vision_lines(batch: Batch) -> list[str]:
                 "  주의: 여백이 적은 문서다. 쪽 전체가 나온 그림이나 PDF가 아니면 추적하지 못할 수 있다."
             )
     return lines
+
+
+def thin_page_lines(batch: Batch) -> list[str]:
+    """빈 바탕이 적은 쪽에 대해 알릴 말. 무늬는 글자나 그림이 없는 칸에서만 읽을 수 있다."""
+    if not batch.thin_pages:
+        return []
+    shown = ", ".join(str(number) for number in batch.thin_pages[:10])
+    more = " 외" if len(batch.thin_pages) > 10 else ""
+    lines = [
+        f"주의: 빈 바탕이 적은 쪽이 {batch.pages}쪽 가운데 {len(batch.thin_pages)}쪽 있다({shown}쪽{more}). "
+        "쪽 전체가 그림이나 색으로 덮인 쪽이다. 이런 쪽은 화면 그림 한 장이나 사진 한 장으로는 "
+        "누구의 복사본인지 찾지 못할 수 있다."
+    ]
+    if batch.blank_cells < TRACE_MIN_CELLS:
+        lines.append(
+            "  문서 전체에도 빈 바탕이 모자라다. PDF 전체가 유출돼도 무늬로는 찾지 못한다. "
+            "손대지 않은 파일의 해시로만 찾을 수 있다."
+        )
+    else:
+        lines.append("  PDF 전체나 빈 바탕이 있는 다른 쪽이 함께 있으면 찾는다.")
+    return lines
+
+
+def notice_lines(batch: Batch) -> list[str]:
+    """복사본을 만든 뒤 사용자에게 알릴 말. 명령줄과 웹 화면이 함께 쓴다."""
+    return [*low_vision_lines(batch), *thin_page_lines(batch)]

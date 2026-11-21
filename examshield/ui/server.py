@@ -41,7 +41,7 @@ from examshield.convert import (
 from examshield.errors import ExamShieldError
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
-from examshield.protect.batch import CopiesFailed, low_vision_lines, make_copies
+from examshield.protect.batch import CopiesFailed, make_copies, notice_lines
 from examshield.protect.copies import keyed_technique, parse_examinee_ids, read_map
 from examshield.protect.pipeline import KEYED, expectation_from_text, protect_and_check
 from examshield.trace.detect import MAX_LEAKED_FILES, format_trace, trace_many
@@ -304,7 +304,7 @@ class Service:
                 f"복사본 {len(batch.rows)}개, 모두 검사 통과",
                 f"이번에 만든 것 {batch.made}개, 그대로 둔 것 {batch.kept}개",
                 f"수험번호: {ids[0]} ~ {ids[-1]} ({len(ids)}개)",
-                *low_vision_lines(batch),
+                *notice_lines(batch),
                 f"출력 폴더: {out.relative_to(self.base_dir)}",
                 f"매핑표: {table.relative_to(self.base_dir)}",
                 "매핑표와 시드 파일은 유출본을 추적할 때 필요하다. 배포하지 말고 따로 보관한다.",

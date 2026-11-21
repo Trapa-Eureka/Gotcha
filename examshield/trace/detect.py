@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from examshield.clearzone import open_cells
+from examshield.clearzone import TRACE_MIN_CELLS, open_cells
 from examshield.errors import ExamShieldError
 from examshield.pdfio import render_gray
 from examshield.protect.copies import DOTS, MapRow
@@ -30,7 +30,7 @@ MIN_TILE_CELLS = 8
 PDF_SUFFIX = ".pdf"
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
 BACKGROUND_MIN = 250
-MIN_CELLS = 300
+MIN_CELLS = TRACE_MIN_CELLS
 MIN_SCORE = 6.0
 MIN_MARGIN = 3.0
 MIN_INLIERS = 20
