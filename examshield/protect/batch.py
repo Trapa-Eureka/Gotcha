@@ -213,7 +213,7 @@ def thin_page_lines(batch: Batch) -> list[str]:
     more = " 외" if len(batch.thin_pages) > 10 else ""
     lines = [
         f"주의: 빈 바탕이 적은 쪽이 {batch.pages}쪽 가운데 {len(batch.thin_pages)}쪽 있다({shown}쪽{more}). "
-        "쪽 전체가 그림이나 색으로 덮인 쪽이다. 이런 쪽은 화면 그림 한 장이나 사진 한 장으로는 "
+        "쪽 전체가 사진이나 무늬, 어두운 색으로 덮인 쪽이다. 이런 쪽은 화면 그림 한 장이나 사진 한 장으로는 "
         "누구의 복사본인지 찾지 못할 수 있다."
     ]
     if batch.blank_cells < TRACE_MIN_CELLS:

@@ -7,7 +7,7 @@ import numpy as np
 import pymupdf
 from numpy.typing import NDArray
 
-from examshield.clearzone import BACKGROUND_MIN, CLEAR_RANGE, open_cells
+from examshield.clearzone import CLEAR_RANGE, open_cells
 from examshield.errors import ExamShieldError
 from examshield.pdfio import (
     normalize_text,
@@ -383,7 +383,7 @@ def _lift_overlay(
         # 저시력 수험생용: 글자와 그림 둘레에는 무늬가 없어야 한다. 비울 칸은 무늬를 넣기 전의 쪽에서
         # 구한다. 원본과 복사본의 렌더링이 한두 단계 다를 수 있어, 어기는지는 한 칸 좁혀서 본다.
         near = max(clear_pt - cell, 0)
-        loose = open_cells(before, cell, near, rows, cols, BACKGROUND_MIN - CLEAR_SLACK)
+        loose = open_cells(before, cell, near, rows, cols, CLEAR_SLACK)
         if np.any(marks & ~loose):
             return f"{label}가 글자나 그림 둘레에도 들어가 있다. 저시력 수험생용 복사본이 아니다"
         usable = open_cells(before, cell, clear_pt, rows, cols)

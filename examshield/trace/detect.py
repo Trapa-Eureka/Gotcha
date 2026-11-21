@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from examshield.clearzone import TRACE_MIN_CELLS, open_cells
+from examshield.clearzone import DARKEST_BACKGROUND, TRACE_MIN_CELLS, UNIFORM_RANGE, open_cells
 from examshield.errors import ExamShieldError
 from examshield.pdfio import render_gray
 from examshield.protect.copies import DOTS, MapRow
@@ -29,7 +29,9 @@ DOTS_TILE = 8
 MIN_TILE_CELLS = 8
 PDF_SUFFIX = ".pdf"
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
-BACKGROUND_MIN = 250
+# 밝기가 비슷한 바탕끼리 묶는 폭과, 한 묶음에 있어야 하는 칸 수.
+LEVEL_STEP = 8
+MIN_GROUP = 16
 MIN_CELLS = TRACE_MIN_CELLS
 MIN_SCORE = 6.0
 MIN_MARGIN = 3.0
@@ -343,8 +345,12 @@ def _read_dots(
     radius = max(1, round(DOTS_DPI / 72.0 / dots.PX_PER_PT))
     picture = image.astype(np.float64)
     dark = cv2.blur(picture, (window, window)) - cv2.blur(picture, (2 * radius + 1, 2 * radius + 1))
-    usable = (reference >= BACKGROUND_MIN) & valid
-    blank = cv2.erode(usable.astype(np.uint8), np.ones((window, window), dtype=np.uint8)) > 0
+    # 빈 바탕: 칸 둘레까지 원본의 밝기가 고르고 너무 어둡지 않은 곳. 흰 종이와 고른 바탕색이 해당한다.
+    box = np.ones((window, window), dtype=np.uint8)
+    lowest = cv2.erode(reference, box)
+    even = (cv2.dilate(reference, box).astype(np.int16) - lowest) <= UNIFORM_RANGE
+    covered = cv2.erode(valid.astype(np.uint8), box) > 0
+    blank = even & (lowest >= DARKEST_BACKGROUND) & covered
     height, width = reference.shape
     reach = int(step // 2)
     offsets = np.arange(-reach, reach + 1, dtype=np.intp)
@@ -526,6 +532,7 @@ def _read_cells(
     darker = reference.astype(np.float64) - image.astype(np.float64)
     cells: list[int] = []
     values: list[float] = []
+    levels: list[int] = []
     height, width = reference.shape
     for row in range(rows):
         top, bottom = round(row * step + inset), round((row + 1) * step - inset)
@@ -536,7 +543,10 @@ def _read_cells(
             if right > width or right <= left:
                 continue
             # 글자가 없는 빈 바탕 칸만 쓴다. 글자 가장자리는 캡처마다 달라서 잡음이 크다.
-            if int(np.min(reference[top:bottom, left:right])) < BACKGROUND_MIN:
+            # 빈 바탕은 밝기가 고른 칸이다. 흰 종이뿐 아니라 고르게 깔린 바탕색도 된다.
+            patch = reference[top:bottom, left:right]
+            darkest = int(np.min(patch))
+            if darkest < DARKEST_BACKGROUND or int(np.max(patch)) - darkest > UNIFORM_RANGE:
                 continue
             if not valid[top:bottom, left:right].all():
                 continue
@@ -545,15 +555,27 @@ def _read_cells(
                 continue
             cells.append(row * cols + col)
             values.append(change)
-    if len(cells) < MIN_CELLS // 4:
-        return None
+            levels.append((255 - darkest) // LEVEL_STEP)
+    numbers = np.array(cells, dtype=np.intp)
     measured = np.array(values, dtype=np.float64)
+    # 캡처의 색은 화면과 저장 방식에 따라 원본과 조금씩 다르게 나오고, 그 차이는 바탕의 밝기마다 다르다.
+    # 그래서 밝기가 비슷한 바탕끼리 묶어 묶음마다 평균을 뺀다. 흰 종이는 묶음이 하나라 전과 같다.
+    groups = np.array(levels, dtype=np.intp)
+    keep = np.zeros(len(numbers), dtype=bool)
+    for level in np.unique(groups):
+        members = groups == level
+        if int(members.sum()) < MIN_GROUP:
+            continue
+        measured[members] -= measured[members].mean()
+        keep |= members
+    if int(keep.sum()) < MIN_CELLS // 4:
+        return None
     return Evidence(
         page_index=page_index,
         rows=rows,
         cols=cols,
-        cells=np.array(cells, dtype=np.intp),
-        values=measured - measured.mean(),
+        cells=numbers[keep],
+        values=measured[keep],
     )
 
 

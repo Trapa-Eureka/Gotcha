@@ -15,7 +15,10 @@ from examshield.errors import ExamShieldError
 from examshield.pdfio import render_gray
 
 MASK_DPI = 72
-BACKGROUND_MIN = 250
+# 빈 바탕으로 보는 칸: 칸 안의 밝기가 고르고(가장 밝은 곳과 어두운 곳의 차이가 이 값 이하) 너무 어둡지 않다.
+# 흰 종이뿐 아니라 옅은 바탕색이 고르게 깔린 곳도 빈 바탕이다. 글자, 선, 그림, 사진은 고르지 않다.
+UNIFORM_RANGE = 5
+DARKEST_BACKGROUND = 128
 DEFAULT_CLEAR_PT = 18
 CLEAR_RANGE = (6, 72)
 
@@ -32,16 +35,26 @@ def reach(clear_pt: int, cell_pt: int) -> int:
     return math.ceil(clear_pt / cell_pt)
 
 
-def busy_cells(
-    page: Any, cell_pt: int, rows: int, cols: int, background: int = BACKGROUND_MIN
-) -> NDArray[np.bool_]:
-    """내용이 조금이라도 있는 칸. 쪽을 1pt에 화소 하나로 그려서 본다."""
+def busy_cells(page: Any, cell_pt: int, rows: int, cols: int, slack: int = 0) -> NDArray[np.bool_]:
+    """내용이 조금이라도 있는 칸. 쪽을 1pt에 화소 하나로 그려서 본다.
+
+    slack만큼 느슨하게 본다(밝기 차이를 그만큼 더 봐주고, 그만큼 더 어두운 바탕도 받는다).
+    """
     gray = render_gray(page, MASK_DPI)
-    canvas = np.full((rows * cell_pt, cols * cell_pt), 255, dtype=np.uint8)
-    height, width = min(gray.shape[0], canvas.shape[0]), min(gray.shape[1], canvas.shape[1])
-    canvas[:height, :width] = gray[:height, :width]
-    darkest = canvas.reshape(rows, cell_pt, cols, cell_pt).min(axis=(1, 3))
-    return np.asarray(darkest < background, dtype=np.bool_)
+    height = min(gray.shape[0], rows * cell_pt)
+    width = min(gray.shape[1], cols * cell_pt)
+    # 쪽 밖으로 나가는 가장자리 칸은 쪽 가장자리의 화소로 채운다. 흰색으로 채우면 색 바탕 쪽의
+    # 가장자리 칸이 모두 내용이 있는 칸으로 잡힌다.
+    canvas = np.pad(
+        gray[:height, :width],
+        ((0, rows * cell_pt - height), (0, cols * cell_pt - width)),
+        mode="edge",
+    )
+    blocks = canvas.reshape(rows, cell_pt, cols, cell_pt)
+    darkest = blocks.min(axis=(1, 3)).astype(np.int16)
+    brightest = blocks.max(axis=(1, 3)).astype(np.int16)
+    uneven = brightest - darkest > UNIFORM_RANGE + slack
+    return np.asarray(uneven | (darkest < DARKEST_BACKGROUND - slack), dtype=np.bool_)
 
 
 def open_cells(
@@ -50,10 +63,10 @@ def open_cells(
     clear_pt: int,
     rows: int,
     cols: int,
-    background: int = BACKGROUND_MIN,
+    slack: int = 0,
 ) -> NDArray[np.bool_]:
     """무늬를 넣어도 되는 칸. 내용이 있는 칸에서 clear_pt 안쪽의 칸은 뺀다."""
-    return ~_spread(busy_cells(page, cell_pt, rows, cols, background), reach(clear_pt, cell_pt))
+    return ~_spread(busy_cells(page, cell_pt, rows, cols, slack), reach(clear_pt, cell_pt))
 
 
 def _spread(busy: NDArray[np.bool_], cells: int) -> NDArray[np.bool_]:
