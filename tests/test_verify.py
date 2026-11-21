@@ -19,7 +19,12 @@ from examshield.verify.models.base import ModelClient, PageInput, prompt_of, rea
 from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.mock import MockModel
 from examshield.verify.report import format_report, load_report, write_report
-from examshield.verify.runner import Skipped, builtin_subject, run_verification
+from examshield.verify.runner import (
+    Skipped,
+    builtin_subject,
+    custom_subject,
+    run_verification,
+)
 
 NOW = datetime(2026, 11, 20, 9, 0, 0, tzinfo=UTC)
 REQUIRED_REPORT_KEYS = {
@@ -394,3 +399,59 @@ def test_cli_measures_benchmark_v2_and_refuses_to_record_it(tmp_path: Path) -> N
     assert result.exit_code == 0, result.output
     assert report["benchmark"]["version"] == "v2" and report["benchmark"]["item_count"] == 9
     assert recorded.exit_code == 2 and unknown.exit_code == 2
+
+
+def test_keep_replies_writes_what_the_model_said_next_to_the_report(tmp_path: Path) -> None:
+    base = ["verify", "--profile", "a-remap-decoy", "--models", "mock", "--out", str(tmp_path)]
+
+    result = CliRunner().invoke(
+        app, [*base, "--benchmark", "v2", "--question-decoys", "--keep-replies"]
+    )
+    kept_path = next(tmp_path.glob("*.replies.json"))
+    kept = json.loads(kept_path.read_text(encoding="utf-8"))
+    report_path = tmp_path / kept["report"]
+    protected = [
+        entry
+        for entry in kept["replies"]
+        if entry["model"] == "mock-reader" and entry["variant"] == "protected"
+    ]
+
+    assert result.exit_code == 0, result.output
+    assert "문항별 답" in result.output and str(kept_path) in result.output
+    assert report_path.is_file() and "replies" not in json.loads(report_path.read_text("utf-8"))
+    assert len(protected) == 9 and all(len(entry["questions"]) == 4 for entry in protected)
+    assert all(entry["reply"] and entry["input_text"] for entry in protected)
+    # 모의 모델은 문항을 가리키는 미끼를 그대로 따른다.
+    assert all(q["given"] == q["decoy"] for entry in protected for q in entry["questions"])
+    # 응답 파일은 리포트로도, 검증 기록으로도 읽히지 않는다.
+    assert CliRunner().invoke(app, ["report", str(kept_path)]).exit_code == 2
+    assert record_refusal(kept) is not None
+
+
+def test_replies_are_not_kept_without_the_option_or_for_a_custom_file(
+    tmp_path: Path, sample_file: Path
+) -> None:
+    base = ["verify", "--profile", "none", "--models", "mock", "--out", str(tmp_path)]
+
+    plain = CliRunner().invoke(app, base)
+    custom = CliRunner().invoke(app, [*base, "--allow-custom", str(sample_file), "--keep-replies"])
+
+    assert plain.exit_code == 0, plain.output
+    assert custom.exit_code == 2 and "--keep-replies" in custom.output
+    assert not list(tmp_path.glob("*.replies.json"))
+    with pytest.raises(ExamShieldError, match="내장 문항"):
+        run_verification(
+            load_profile("none"),
+            custom_subject(sample_file.read_bytes()),
+            [TextLayerModel()],
+            now=NOW,
+            replies=[],
+        )
+
+
+def test_a_real_reply_is_kept_word_for_word() -> None:
+    page = PageInput(text="", image_png=b"", choice_count=4, questions=(1, 2))
+
+    reply = read_reply("못 읽겠다.\n정답 1: 3\n정답 2: 4", page)
+
+    assert reply.raw == "못 읽겠다.\n정답 1: 3\n정답 2: 4" and reply.answers == {1: 3, 2: 4}

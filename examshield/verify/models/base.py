@@ -45,6 +45,8 @@ class ModelReply:
     refused: bool = False
     # 쪽에 문항이 여럿일 때 문항 번호 → 답.
     answers: dict[int, int] = field(default_factory=dict)
+    # 모델이 돌려준 글 그대로. verify --keep-replies로 남길 때만 쓴다.
+    raw: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,7 +73,10 @@ def read_reply(text: str, page: PageInput) -> ModelReply:
             transcription=strip_answer_line(text),
             answer=None,
             answers=parse_answers(text, page.questions, page.choice_count),
+            raw=text,
         )
     return ModelReply(
-        transcription=strip_answer_line(text), answer=parse_answer(text, page.choice_count)
+        transcription=strip_answer_line(text),
+        answer=parse_answer(text, page.choice_count),
+        raw=text,
     )

@@ -81,7 +81,14 @@ from examshield.verify.models.baseline import TesseractModel, TextLayerModel
 from examshield.verify.models.cloud import chosen_model
 from examshield.verify.models.local import OllamaModel
 from examshield.verify.models.mock import MockModel
-from examshield.verify.report import display_width, format_report, load_report, write_report
+from examshield.verify.report import (
+    display_width,
+    format_replies,
+    format_report,
+    load_report,
+    write_replies,
+    write_report,
+)
 from examshield.verify.runner import (
     Skipped,
     Subject,
@@ -299,9 +306,20 @@ def verify(
         "--record",
         help="결과를 이 프로파일의 최신 검증 기록으로 저장소(examshield/profiles/verified)에 남긴다.",
     ),
+    keep_replies: bool = typer.Option(
+        False,
+        "--keep-replies",
+        help="모델이 돌려준 글과 문항별 답을 리포트 옆 파일에 남긴다. 내장 문항 세트로 잴 때만 된다.",
+    ),
 ) -> None:
+    replies: list[dict[str, Any]] | None = [] if keep_replies else None
     try:
         loaded = load_profile(profile)
+        if keep_replies and allow_custom is not None:
+            raise ExamShieldError(
+                "--keep-replies는 --allow-custom과 함께 쓸 수 없다. "
+                "응답에는 문서를 옮겨 적은 글이 들어 있어서 사용자의 파일로 잴 때는 남기지 않는다."
+            )
         if record and getattr(sys, "frozen", False):
             raise ExamShieldError(
                 "단일 실행 파일에서는 --record를 쓸 수 없다. 기록할 저장소가 없다. "
@@ -361,8 +379,10 @@ def verify(
             transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY, key),
             answer_key=key is not None,
             only=only,
+            replies=replies,
         )
         path = write_report(report, out)
+        replies_path = write_replies(replies, path) if replies is not None else None
     except ExamShieldError as error:
         raise _fail(error) from error
     typer.echo(format_report(report))
@@ -370,6 +390,9 @@ def verify(
     if verdict:
         typer.echo("\n" + verdict)
     typer.echo(f"\n리포트: {path}")
+    if replies and replies_path is not None:
+        typer.echo("\n" + format_replies(replies))
+        typer.echo(f"응답 글: {replies_path}")
     if not any(row["errors"] < row["items"] for row in report["results"]):
         typer.echo("오류: 측정된 값이 하나도 없다. 위의 건너뜀과 오류 수를 확인한다.", err=True)
         raise typer.Exit(1)

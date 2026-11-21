@@ -17,6 +17,44 @@ def write_report(report: dict[str, Any], out_dir: Path) -> Path:
     return path
 
 
+def write_replies(replies: list[dict[str, Any]], report_path: Path) -> Path:
+    """리포트 옆에 응답 글을 따로 쓴다. 리포트에는 문항 텍스트를 넣지 않기 때문이다."""
+    path = report_path.with_name(report_path.stem + ".replies.json")
+    content = {"report": report_path.name, "replies": replies}
+    path.write_text(json.dumps(content, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def format_replies(replies: list[dict[str, Any]]) -> str:
+    """문항마다 모델의 답이 정답, 미끼, 다른 번호, 답 없음 가운데 어디에 드는지 센다."""
+    counts: dict[tuple[str, str, str], dict[str, int]] = {}
+    for entry in replies:
+        if not entry["solves"]:
+            # 글자만 읽는 기준선은 답을 내지 않는다.
+            continue
+        bucket = counts.setdefault(
+            (entry["model"], entry["channel"], entry["variant"]),
+            {"correct": 0, "decoy": 0, "other": 0, "none": 0},
+        )
+        for question in entry["questions"]:
+            given = question["given"]
+            if given is None:
+                bucket["none"] += 1
+            elif given == question["answer"]:
+                bucket["correct"] += 1
+            elif given == question["decoy"]:
+                bucket["decoy"] += 1
+            else:
+                bucket["other"] += 1
+    lines = ["문항별 답 (정답 / 미끼 / 다른 번호 / 답 없음)"]
+    for (model, channel, variant), bucket in counts.items():
+        lines.append(
+            f"  {model}  {channel}  {variant}:  {bucket['correct']} / {bucket['decoy']} / "
+            f"{bucket['other']} / {bucket['none']}"
+        )
+    return "\n".join(lines)
+
+
 def load_report(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise ExamShieldError(f"리포트 파일을 찾지 못했다: {path}")

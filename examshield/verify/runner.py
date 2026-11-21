@@ -20,7 +20,14 @@ from examshield.verify.capture_sim import (
     simulate_capture,
 )
 from examshield.verify.metrics import legibility, mean
-from examshield.verify.models.base import FILE, IMAGE, TEXT, ModelClient, PageInput
+from examshield.verify.models.base import (
+    FILE,
+    IMAGE,
+    TEXT,
+    ModelClient,
+    ModelReply,
+    PageInput,
+)
 
 REPORT_SCHEMA = 1
 SCREEN_DPI = 150
@@ -138,9 +145,14 @@ def run_verification(
     transform: Transform | None = None,
     only: tuple[str, ...] | None = None,
     answer_key: bool = False,
+    replies: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """replies에 목록을 주면 호출마다 모델이 돌려준 글과 문항별 채점을 거기에 담는다."""
     if isinstance(subject, ItemSet):
         subject = builtin_subject(subject)
+    if replies is not None and subject.custom:
+        # 응답에는 문서를 옮겨 적은 글이 들어 있다. 사용자의 시험지를 파일로 남기지 않는다.
+        raise ExamShieldError("응답 글은 내장 문항 세트로 잴 때만 남긴다.")
     if profile.techniques and transform is None:
         raise ExamShieldError(
             f"프로파일 '{profile.name}'에는 교란 기법이 있는데, 이를 적용할 변환 함수가 없다."
@@ -171,6 +183,7 @@ def run_verification(
     measured: list[ModelClient] = []
     for model in models:
         rows: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
         try:
             for channel in channels:
                 if channel not in model.info.channels:
@@ -185,6 +198,7 @@ def run_verification(
                             subject,
                             decoys[variant],
                             tables[variant],
+                            kept if replies is not None else None,
                         )
                     )
         except ModelAbortError as error:
@@ -192,6 +206,8 @@ def run_verification(
             continue
         results += rows
         measured.append(model)
+        if replies is not None:
+            replies += kept
 
     notes = []
     if PROTECTED not in variants:
@@ -280,6 +296,57 @@ def _page_inputs(
     return inputs
 
 
+def _decoy_for(
+    index: int,
+    number: int | None,
+    multi: bool,
+    decoys: tuple[int, ...] | None,
+    table: dict[tuple[int, int | None], int] | None,
+) -> int | None:
+    if multi:
+        if table is None:
+            return None
+        return table.get((index + 1, number), table.get((index + 1, None)))
+    return decoys[index] if decoys is not None else None
+
+
+def _kept(
+    model: ModelClient,
+    channel: str,
+    variant: str,
+    index: int,
+    page: PageInput,
+    truth: Truth,
+    reply: ModelReply,
+    decoys: tuple[int, ...] | None,
+    table: dict[tuple[int, int | None], int] | None,
+) -> dict[str, Any]:
+    """호출 한 번의 기록. 왜 그런 숫자가 나왔는지 사람이 읽어 보기 위한 것이다."""
+    multi = bool(page.questions)
+    questions = []
+    for number, answer in truth.questions:
+        questions.append(
+            {
+                "number": number,
+                "answer": answer,
+                "decoy": _decoy_for(index, number, multi, decoys, table),
+                "given": reply.answers.get(number) if multi else reply.answer,
+            }
+        )
+    return {
+        "model": model.info.name,
+        "solves": model.info.solves,
+        "channel": channel,
+        "variant": variant,
+        "page": index + 1,
+        "refused": reply.refused,
+        # 텍스트 복사 경로에서는 모델이 받은 글도 남긴다. 미끼가 어디에 어떻게 보였는지 볼 수 있다.
+        "input_text": page.text if channel == TEXT else None,
+        "reply": reply.raw or reply.transcription,
+        "questions": questions,
+    }
+
+
 def _measure(
     model: ModelClient,
     channel: str,
@@ -288,6 +355,7 @@ def _measure(
     subject: Subject,
     decoys: tuple[int, ...] | None,
     table: dict[tuple[int, int | None], int] | None = None,
+    kept: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     scores: list[float] = []
     correct: list[float] = []
@@ -302,6 +370,8 @@ def _measure(
             continue
         refusals += 1 if reply.refused else 0
         scores.append(legibility(reply.transcription, truth.text))
+        if kept is not None:
+            kept.append(_kept(model, channel, variant, index, page, truth, reply, decoys, table))
         if subject.multi:
             # 문항마다 채점한다. 미끼는 그 문항을 가리키는 것이 있으면 그것을, 없으면 그 쪽의 것을 본다.
             for number, answer in truth.questions:
