@@ -141,6 +141,41 @@ git config core.hooksPath .githooks
 
 After that, ruff, mypy and pytest run right before `git push`, and the push is blocked if any of them fails. No server-side CI is used. The check runs on your own machine, so `git push --no-verify` skips it.
 
+### Trying real documents
+
+The tests run on documents made for them. Real documents have structures the tests lack: of the first four public PDFs tried, `protect` failed on three (2026-11-21). After adding a technique or changing `check`, run the steps below on a few real documents.
+
+```bash
+mkdir -p out/real secrets
+head -c 32 /dev/urandom > secrets/real.seed
+printf 'S0001\nS0002\nS0003\n' > out/ids.csv
+
+# 1. Make a copy with each profile. No copy comes out if the check fails
+for profile in a-rasterize a-glyph-remap a-remap-decoy; do
+  uv run examshield protect document.pdf --out out/real/$profile --profile $profile
+done
+
+# 2. Make per-examinee copies and trace a leaked one
+for profile in a-watermark a-full b-dots; do
+  uv run examshield protect document.pdf --out out/real/$profile --profile $profile \
+      --copies out/ids.csv --seed-file secrets/real.seed --map-file secrets/real-$profile.csv
+  uv run examshield trace out/real/$profile/document-S0002.pdf --original document.pdf \
+      --map-file secrets/real-$profile.csv --seed-file secrets/real.seed
+done
+
+# 3. Open a copy in a viewer, capture that window and trace it (macOS)
+open -a Preview out/real/a-watermark/document-S0002.pdf
+screencapture -o -w out/capture.png        # click the window to capture
+uv run examshield trace out/capture.png --original document.pdf \
+    --map-file secrets/real-a-watermark.csv --seed-file secrets/real.seed
+```
+
+- Pick documents that look different from each other. A real exam paper, a report full of tables and figures, a long paper and a publication whose pages are all pictures each exposed a different problem.
+- Keep downloaded documents outside the repository or under `out/`. Do not add other people's documents to the repository.
+- When something fails, do not add the document to the tests. Build a small file with only the structure that caused the failure and add it to `tests/test_real_documents.py`.
+- Step 3 is right when `trace` names S0002. Try it zoomed in and out, scrolled, and saved as JPEG too.
+- For the printed exam (`b-dots`), do step 3 with a photo of a printed copy. Nobody has done this yet.
+
 ## Known limitations
 
 - The three scenario A techniques do not change what is shown on screen. They do nothing against a screenshot or an AI that reads the page as a picture. In the measurements, OCR legibility on the image path was the same before and after.
@@ -157,7 +192,7 @@ After that, ruff, mypy and pytest run right before `git push`, and the push is b
 - Of the cloud model clients, OpenAI and Google have never been called with a real key. Only Anthropic was actually called. The requests each vendor's SDK sends were only received and checked by a fake server on the same machine. The fake server's responses were written from memory, so real responses may differ.
 - Of the default model names (`gpt-6.2-sol`, `claude-opus-5-5`, `gemini-3.8-flash`), the OpenAI and Google ones are guesses picked from the names listed in the installed SDKs. Whether they are those vendors' flagship models was not confirmed. They can be changed with environment variables.
 - `check` does not run OCR on a page whose rendering is pixel-identical to the original, because the OCR result would be identical too. For such pages this skips the step in spec section 6.2 ("OCR the rendering and compare"). `protect` on a 12-page licence PDF went from about 20 seconds to about 2. Pages whose rendering differs at all are still read by OCR, so a long document with many such pages is still slow.
-- `--copies` slows down in proportion to the number of copies. On the 12-page built-in item PDF one copy takes about 0.15 seconds for `a-full`, 0.1 for `a-watermark` and 0.55 for `b-dots`. With eight or more copies the work is split across several processes (`--jobs`, up to 8 by default). Making 200 examinee copies with 8 processes took 6 seconds for `a-full`, 4 for `a-watermark` and 16 for `b-dots` (single runs on one 14-core Mac). It has not been measured on much longer documents or on PCs with fewer cores. With the same document and 200 examinee numbers, `trace` took 0.4–0.7 seconds for a PDF, 0.5 for one screenshot and 1.2 for one simulated photo (single runs).
+- `--copies` slows down in proportion to the number of copies. On the 12-page built-in item PDF one copy takes about 0.15 seconds for `a-full`, 0.1 for `a-watermark` and 0.55 for `b-dots`. With eight or more copies the work is split across several processes (`--jobs`, up to 8 by default). Making 200 examinee copies with 8 processes took 6 seconds for `a-full`, 4 for `a-watermark` and 16 for `b-dots` (single runs on one 14-core Mac). It has not been measured on much longer documents or on PCs with fewer cores. With the same document and 200 examinee numbers, `trace` took 0.4–0.7 seconds for a PDF, 0.5 for one screenshot and 1.2 for one simulated photo (single runs). For a single picture, `trace` first orders the pages using small renders and then matches the likeliest page first. One picture took 2–3 seconds on a 75-page paper and 1–2 seconds on a 35-page A3 exam paper, using up to 0.9–1.4 GB of memory (the step that extracts features from a large page).
 - The printed-exam features (`b-dots`, recovery from photos, `calibrate`) were checked with the capture simulation only. They have never been tried with a real printer and camera. One dot is 0.5 pt (about 0.18 mm) on a side, so depending on printer resolution, toner spread and paper it may not print or may smear. Recovery from photos of curled or folded paper, of only part of a page, or of a photocopy was not checked either.
 - The dot pattern does not stop an AI from reading the page. Given pictures that imitate printing and photographing, Claude scored 100% legibility and accuracy, the same as without the pattern (2026-11-21, one model, 12 items, simulation). `b-dots` is therefore treated as a leak-tracing profile only. The dots are visible (about 0.35% of the page area), and their effect on human legibility was not measured. Examinees with low vision need the original without dots, and that copy cannot be traced.
 - For a dotted copy, `check` verifies that the page with the pattern lifted off equals the original, and that the pattern consists only of black dots at cell centres. Large letters or pictures drawn with cell-centre dots alone cannot be told apart from the pattern.

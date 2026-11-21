@@ -139,6 +139,41 @@ git config core.hooksPath .githooks
 
 그러면 `git push` 직전에 ruff, mypy, pytest가 돌고, 하나라도 실패하면 푸시가 막힌다. 서버에서 도는 CI는 쓰지 않는다. 각자 PC에서 도는 검사라 `git push --no-verify`로 건너뛸 수 있다.
 
+### 실제 문서로 돌려 보기
+
+테스트는 직접 만든 문서로만 돈다. 실제 문서에는 테스트에 없는 구조가 있어서, 처음 돌려 본 공개 PDF 네 개 가운데 세 개에서 `protect`가 실패했다(2026-11-21). 새 기법을 넣거나 `check`를 고친 뒤에는 실제 문서 몇 개로 아래 순서를 돌려 본다.
+
+```bash
+mkdir -p out/real secrets
+head -c 32 /dev/urandom > secrets/real.seed
+printf 'S0001\nS0002\nS0003\n' > out/ids.csv
+
+# 1. 프로파일마다 복사본을 만든다. 검사에 실패하면 복사본이 나오지 않는다
+for profile in a-rasterize a-glyph-remap a-remap-decoy; do
+  uv run examshield protect 문서.pdf --out out/real/$profile --profile $profile
+done
+
+# 2. 수험번호별 복사본을 만들고 유출본을 추적한다
+for profile in a-watermark a-full b-dots; do
+  uv run examshield protect 문서.pdf --out out/real/$profile --profile $profile \
+      --copies out/ids.csv --seed-file secrets/real.seed --map-file secrets/real-$profile.csv
+  uv run examshield trace out/real/$profile/문서-S0002.pdf --original 문서.pdf \
+      --map-file secrets/real-$profile.csv --seed-file secrets/real.seed
+done
+
+# 3. 복사본을 뷰어로 열고 그 창을 찍어서 추적한다 (macOS)
+open -a Preview out/real/a-watermark/문서-S0002.pdf
+screencapture -o -w out/capture.png        # 찍을 창을 누른다
+uv run examshield trace out/capture.png --original 문서.pdf \
+    --map-file secrets/real-a-watermark.csv --seed-file secrets/real.seed
+```
+
+- 문서는 모양이 서로 다른 것으로 고른다. 실제 시험지, 표와 그림이 많은 보고서, 쪽수가 많은 논문, 쪽 전체가 그림인 간행물이 서로 다른 문제를 드러냈다.
+- 내려받은 문서는 저장소 밖이나 `out/`에 둔다. 남의 문서를 저장소에 넣지 않는다.
+- 실패하면 문서를 테스트에 넣지 말고, 실패를 일으킨 구조만 작게 만들어 `tests/test_real_documents.py`에 보탠다.
+- 3번에서 `trace`가 S0002를 찾으면 된다. 확대·축소하거나 스크롤한 화면, JPEG로 저장한 그림으로도 해 본다.
+- 인쇄 시험(`b-dots`)은 복사본을 인쇄해 찍은 사진으로 3번을 한다. 이것은 아직 아무도 해 보지 않았다.
+
 ## 알려진 한계
 
 - 시나리오 A 기법 세 가지는 화면에 보이는 것을 바꾸지 않는다. 화면을 캡처하거나 쪽을 그림으로 읽는 AI에는 효과가 없다. 측정에서도 이미지 경로의 OCR 판독률은 변환 전후가 같았다.
@@ -155,7 +190,7 @@ git config core.hooksPath .githooks
 - 클라우드 모델 연결 중 OpenAI와 Google은 실제 키로 호출해 본 적이 없다. Anthropic만 실제로 호출했다. 각 회사의 SDK가 보내는 요청을 같은 PC의 가짜 서버로 받아 확인했을 뿐이다. 가짜 서버의 응답 형식은 기억에 의존해 만들었으므로 실제 응답과 다를 수 있다.
 - 기본 모델 이름(`gpt-6.2-sol`, `claude-opus-5-5`, `gemini-3.8-flash`) 중 OpenAI와 Google 것은 설치된 SDK에 적힌 이름에서 고른 추측이다. 그 회사의 대표 모델인지 확인하지 못했다. 환경변수로 바꿀 수 있다.
 - `check`는 렌더링이 원본과 픽셀 단위로 같은 쪽을 OCR로 읽지 않는다. 그림이 같으면 OCR 결과도 같기 때문이다. 명세 6.2절의 "렌더링 결과를 OCR해 비교한다"를 그런 쪽에서는 생략하는 것이다. 12쪽짜리 약관 PDF의 `protect`가 약 20초에서 약 2초로 줄었다. 렌더링이 조금이라도 달라진 쪽은 그대로 OCR로 읽으므로, 그런 쪽이 많은 긴 문서는 여전히 느리다.
-- `--copies`는 복사본 수에 비례해 느려진다. 12쪽짜리 내장 문항 PDF로 재면 복사본 하나에 `a-full`은 약 0.15초, `a-watermark`는 약 0.1초, `b-dots`는 약 0.55초가 든다. 복사본이 여덟 개 이상이면 여러 프로세스로 나눠 만든다(`--jobs`, 기본 최대 8). 수험번호 200개를 프로세스 8개로 만들어 보니 `a-full` 6초, `a-watermark` 4초, `b-dots` 16초였다(14코어 맥 한 대에서 한 번씩 잰 값). 쪽수가 훨씬 많은 문서나 코어가 적은 PC에서는 재지 않았다. `trace`는 같은 문서와 수험번호 200개로 PDF 0.4~0.7초, 화면 캡처 한 장 0.5초, 촬영 시뮬레이션 사진 한 장 1.2초였다(한 번씩 잰 값).
+- `--copies`는 복사본 수에 비례해 느려진다. 12쪽짜리 내장 문항 PDF로 재면 복사본 하나에 `a-full`은 약 0.15초, `a-watermark`는 약 0.1초, `b-dots`는 약 0.55초가 든다. 복사본이 여덟 개 이상이면 여러 프로세스로 나눠 만든다(`--jobs`, 기본 최대 8). 수험번호 200개를 프로세스 8개로 만들어 보니 `a-full` 6초, `a-watermark` 4초, `b-dots` 16초였다(14코어 맥 한 대에서 한 번씩 잰 값). 쪽수가 훨씬 많은 문서나 코어가 적은 PC에서는 재지 않았다. `trace`는 같은 문서와 수험번호 200개로 PDF 0.4~0.7초, 화면 캡처 한 장 0.5초, 촬영 시뮬레이션 사진 한 장 1.2초였다(한 번씩 잰 값). 그림 한 장은 줄인 그림으로 쪽 순서를 먼저 정하고 유력한 쪽부터 맞춰 본다. 75쪽짜리 논문에서 그림 한 장에 2~3초, 35쪽짜리 A3 시험지에서 1~2초였고, 이때 메모리는 0.9~1.4 GB까지 썼다(큰 쪽의 특징점을 구하는 단계).
 - 인쇄 시험 기능(`b-dots`, 사진에서 수험번호 복원, `calibrate`)은 촬영 시뮬레이션으로만 확인했다. 실제 프린터와 카메라로는 한 번도 해 보지 않았다. 점 하나는 한 변이 0.5pt(약 0.18mm)라서 프린터 해상도, 토너 번짐, 용지에 따라 찍히지 않거나 뭉개질 수 있다. 종이가 휘거나 접힌 사진, 쪽의 일부만 찍은 사진, 복사기로 다시 복사한 종이에서의 복원도 확인하지 못했다.
 - 점 무늬는 AI 판독을 막지 못한다. Claude에 인쇄·촬영을 흉내 낸 그림을 줬을 때 판독률과 정답률이 무늬 없는 것과 똑같이 100%였다(2026-11-21, 한 모델, 12문항, 시뮬레이션). 그래서 `b-dots`는 유출 추적용으로만 다룬다. 점은 눈에 보이고(쪽 넓이의 약 0.35%), 사람의 가독성에 주는 영향은 재지 않았다. 저시력 수험생에게는 점 무늬가 없는 원본을 따로 발급해야 하는데, 그 복사본은 추적되지 않는다.
 - 점 무늬 복사본의 `check`는 무늬 그림을 걷어 낸 쪽이 원본과 같은지, 무늬가 칸 가운데의 검은 점만으로 되어 있는지를 본다. 칸 가운데 점만으로 크게 그린 글자나 그림은 무늬와 구별하지 못한다.

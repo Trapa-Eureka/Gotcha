@@ -33,6 +33,9 @@ MIN_SCORE = 6.0
 MIN_MARGIN = 3.0
 MIN_INLIERS = 20
 MATCH_RATIO = 0.75
+# 쪽 순서를 정할 때 쓰는 줄인 그림의 긴 변과 특징점 수.
+COARSE_SIDE = 700
+COARSE_FEATURES = 1500
 # 워터마크가 낼 수 있는 것보다 훨씬 크게 달라진 칸은 가려진 곳(도구 막대, 낙서)이라 버린다.
 MAX_CELL_CHANGE = 2 * watermark.MAX_STRENGTH + 4
 
@@ -67,6 +70,26 @@ def load_reference(pdf: bytes, dpi: int = TRACE_DPI) -> list[Gray]:
     return [render_gray(page, dpi) for page in open_plain_pdf(pdf, "원본")]
 
 
+class _Pages:
+    """원본의 쪽을 필요할 때 그린다. 그림 한 장을 추적할 때는 대개 한두 쪽만 크게 그리면 된다."""
+
+    def __init__(self, pdf: bytes, dpi: int) -> None:
+        self._doc = open_plain_pdf(pdf, "원본")
+        self._dpi = dpi
+
+    def __len__(self) -> int:
+        return int(self._doc.page_count)
+
+    def full(self, index: int) -> Gray:
+        return render_gray(self._doc[index], self._dpi)
+
+    def small(self, index: int) -> Gray:
+        """쪽 순서를 정할 때 쓰는 작은 그림. 긴 변이 COARSE_SIDE 화소쯤 되게 그린다."""
+        rect = self._doc[index].rect
+        dpi = max(18, min(self._dpi, round(COARSE_SIDE * 72.0 / max(rect.width, rect.height))))
+        return render_gray(self._doc[index], dpi)
+
+
 def page_sizes(pdf: bytes) -> list[tuple[float, float]]:
     return [(page.rect.width, page.rect.height) for page in open_plain_pdf(pdf, "원본")]
 
@@ -89,12 +112,13 @@ def trace(
     ids = [row.examinee_id for row in rows]
     if rows[0].kind == DOTS:
         return _trace_dots(leaked, suffix, original, sizes, cell_pt, ids, keys)
-    reference = load_reference(original)
     if suffix == PDF_SUFFIX:
+        reference = load_reference(original)
         return _decide(_from_pdf(leaked, reference, sizes, cell_pt), ids, keys, "PDF 렌더링")
     if suffix not in IMAGE_SUFFIXES:
         raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
-    return _best_page(_from_image(leaked, reference, sizes, cell_pt), ids, keys, "이미지 정합")
+    pages = _Pages(original, TRACE_DPI)
+    return _best_page(_from_image(leaked, pages, sizes, cell_pt), ids, keys, "이미지 정합")
 
 
 def _best_page(
@@ -138,8 +162,8 @@ def _trace_dots(
     keys: list[bytes],
 ) -> TraceResult:
     """점 무늬가 든 복사본. PDF, 화면 캡처, 인쇄물을 찍은 사진을 다룬다."""
-    reference = load_reference(original, DOTS_DPI)
     if suffix == PDF_SUFFIX:
+        reference = load_reference(original, DOTS_DPI)
         doc = open_plain_pdf(leaked, "유출본")
         if doc.page_count != len(reference):
             raise ExamShieldError(
@@ -166,16 +190,16 @@ def _trace_dots(
         raise ExamShieldError(f"trace가 받는 형식이 아니다: {suffix} (PDF 또는 그림 파일)")
     shot = decode_photo(leaked)
     known = features(shot)
-    matched = []
-    for index, page in enumerate(reference):
-        fit = register(shot, page, known)
-        if fit is not None:
-            matched.append((fit[0], index, fit[1]))
+    pages = _Pages(original, DOTS_DPI)
 
     def read() -> Iterator[Evidence]:
-        # 특징점이 많이 맞은 쪽이 사진에 찍힌 쪽일 가능성이 높다. 그 쪽부터 읽는다.
-        for _, index, matrix in sorted(matched, key=lambda entry: -entry[0]):
-            page = reference[index]
+        # 사진에 찍힌 쪽일 가능성이 높은 쪽부터 정밀하게 맞춰 본다. 맞춰 보는 일이 가장 오래 걸린다.
+        for index in _likely_pages(shot, pages):
+            page = pages.full(index)
+            fit = register(shot, page, known)
+            if fit is None:
+                continue
+            matrix = fit[1]
             height, width = page.shape
             warped = cv2.warpPerspective(shot, matrix, (width, height), flags=cv2.INTER_LINEAR)
             covered = cv2.warpPerspective(
@@ -280,18 +304,17 @@ def _from_pdf(
 
 
 def _from_image(
-    leaked: bytes, reference: list[Gray], sizes: list[tuple[float, float]], cell_pt: int
+    leaked: bytes, pages: _Pages, sizes: list[tuple[float, float]], cell_pt: int
 ) -> Iterator[Evidence]:
-    """캡처가 맞춰지는 쪽마다 읽어 낸 칸. 특징점이 많이 맞은 쪽부터 내놓는다."""
+    """캡처가 맞춰지는 쪽마다 읽어 낸 칸. 캡처에 찍힌 쪽일 가능성이 높은 쪽부터 내놓는다."""
     shot = decode_photo(leaked)
     known = _features(shot)
-    matched = []
-    for index, page in enumerate(reference):
+    for index in _likely_pages(shot, pages):
+        page = pages.full(index)
         found = _register(known, page)
-        if found is not None:
-            matched.append((found[0], index, found[1]))
-    for _, index, transform in sorted(matched, key=lambda entry: -entry[0]):
-        page = reference[index]
+        if found is None:
+            continue
+        transform = found[1]
         height, width = page.shape
         warped = cv2.warpAffine(shot, transform, (width, height), flags=cv2.INTER_LINEAR)
         covered = cv2.warpAffine(
@@ -310,6 +333,49 @@ def _from_image(
         )
         if found_cells is not None:
             yield found_cells
+
+
+def _small(image: Gray) -> Gray:
+    scale = COARSE_SIDE / max(image.shape)
+    if scale >= 1.0:
+        return image
+    size = (max(1, round(image.shape[1] * scale)), max(1, round(image.shape[0] * scale)))
+    return np.asarray(cv2.resize(image, size, interpolation=cv2.INTER_AREA), dtype=np.uint8)
+
+
+def _likely_pages(shot: Gray, pages: _Pages) -> list[int]:
+    """모든 쪽 번호를, 그림에 찍힌 쪽일 가능성이 높은 순서로 돌려준다.
+
+    줄인 그림끼리 특징점을 견줘 순서만 정한다. 쪽을 빼지는 않는다. 순서가 틀려도 결과는 같고
+    시간만 더 든다. 쪽마다 정밀하게 맞춰 보는 것보다 훨씬 빠르다.
+    """
+    if len(pages) <= 1:
+        return list(range(len(pages)))
+    sift = getattr(cv2, "SIFT_create")(nfeatures=COARSE_FEATURES)  # noqa: B009
+    shot_points, shot_described = sift.detectAndCompute(_small(shot), None)
+    scores = []
+    for index in range(len(pages)):
+        score = 0
+        page_points, page_described = sift.detectAndCompute(pages.small(index), None)
+        usable = shot_described is not None and page_described is not None
+        if usable and len(shot_points) >= 2 and len(page_points) >= 2:
+            pairs = cv2.BFMatcher(cv2.NORM_L2).knnMatch(shot_described, page_described, k=2)
+            good = [
+                pair[0]
+                for pair in pairs
+                if len(pair) == 2 and pair[0].distance < MATCH_RATIO * pair[1].distance
+            ]
+            score = len(good)
+            if len(good) >= 4:
+                source = np.array([shot_points[m.queryIdx].pt for m in good], dtype=np.float32)
+                target = np.array([page_points[m.trainIdx].pt for m in good], dtype=np.float32)
+                _, inliers = cv2.estimateAffinePartial2D(
+                    source, target, method=cv2.RANSAC, ransacReprojThreshold=3.0
+                )
+                # 자리까지 맞는 짝을 훨씬 무겁게 친다.
+                score += 100 * (int(inliers.sum()) if inliers is not None else 0)
+        scores.append((-score, index))
+    return [index for _, index in sorted(scores)]
 
 
 def _features(image: Gray) -> Features:

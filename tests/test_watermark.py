@@ -649,3 +649,40 @@ def test_trace_stops_reading_pages_once_one_names_the_examinee(sample_pdf: bytes
     nobody = detect._best_page(pages([None, None, None]), IDS, keys, "이미지 정합")
     assert not nobody.found and read == [0, 1, 2]
     assert not detect._best_page(iter(()), IDS, keys, "이미지 정합").found
+
+
+def test_the_page_in_a_capture_is_ranked_first_before_exact_matching() -> None:
+    from examshield.benchmark import load_items, render_items_pdf  # noqa: PLC0415
+    from examshield.pdfio import render_gray  # noqa: PLC0415
+    from examshield.trace import detect  # noqa: PLC0415
+    from examshield.verify.capture_sim import encode_png  # noqa: PLC0415
+
+    pdf = render_items_pdf(load_items().items)
+    _, made = protect_copies(pdf, load_profile("a-watermark"), SEED, IDS[:6])
+    copies = list(made)
+    table = [map_row(copy, SEED, f"{copy.examinee_id}.pdf") for copy in copies]
+    pages = detect._Pages(pdf, detect.TRACE_DPI)
+    drawn: list[int] = []
+    original_full = pages.full
+
+    for number in (0, 6, 11):
+        shot = render_gray(open_pdf_bytes(copies[3].protected.pdf)[number], 130)[100:1300, 80:]
+        assert detect._likely_pages(shot, pages)[0] == number
+
+        def counted(index: int, into: list[int] = drawn) -> detect.Gray:
+            into.append(index)
+            return original_full(index)
+
+        pages.full = counted  # type: ignore[method-assign]
+        drawn.clear()
+        found = detect._best_page(
+            detect._from_image(encode_png(shot), pages, detect.page_sizes(pdf), 8),
+            IDS[:6],
+            [watermark.derive_key(SEED, examinee) for examinee in IDS[:6]],
+            "이미지 정합",
+        )
+        # 찍힌 쪽 하나만 크게 그려 맞춰 봤다.
+        assert found.found and found.examinee_id == IDS[3] and found.pages == (number + 1,)
+        assert drawn == [number]
+        result = trace(encode_png(shot), ".png", pdf, table, SEED)
+        assert result.found and result.examinee_id == IDS[3]
