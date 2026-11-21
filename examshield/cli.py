@@ -7,7 +7,7 @@ import webbrowser
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import typer
 
@@ -20,7 +20,9 @@ from examshield.errors import ExamShieldError, ModelUnavailableError
 from examshield.netguard import OFFLINE_ENV, offline_enabled
 from examshield.ocr import find_tesseract
 from examshield.profiles import Profile, list_profile_names, load_profile
+from examshield.progress import Progress
 from examshield.protect.copies import (
+    append_map,
     check_seed,
     choose_jobs,
     keyed_technique,
@@ -28,6 +30,7 @@ from examshield.protect.copies import (
     protect_copies,
     read_examinee_ids,
     read_map,
+    reusable_rows,
     write_map,
 )
 from examshield.protect.pipeline import (
@@ -64,6 +67,7 @@ from examshield.verify.calibrate import (
     suggest,
 )
 from examshield.verify.capture_sim import CaptureConditions, conditions_from
+from examshield.verify.checkpoint import Checkpoint, Tracked, checkpoint_path
 from examshield.verify.drift import (
     DEFAULT_REPORT_DIR,
     NOT_APPLICABLE,
@@ -312,10 +316,20 @@ def verify(
         "--keep-replies",
         help="모델이 돌려준 글과 문항별 답을 리포트 옆 파일에 남긴다. 내장 문항 세트로 잴 때만 된다.",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="끊기거나 일부 호출이 실패한 실행을 이어 한다. 24시간 안에 받아 둔 응답은 다시 부르지 않는다.",
+    ),
 ) -> None:
     replies: list[dict[str, Any]] | None = [] if keep_replies else None
     try:
         loaded = load_profile(profile)
+        if resume and allow_custom is not None:
+            raise ExamShieldError(
+                "--resume은 --allow-custom과 함께 쓸 수 없다. "
+                "사용자의 파일로 잴 때는 응답을 파일에 적어 두지 않는다."
+            )
         if keep_replies and allow_custom is not None:
             raise ExamShieldError(
                 "--keep-replies는 --allow-custom과 함께 쓸 수 없다. "
@@ -368,20 +382,50 @@ def verify(
                 for page, truth in enumerate(subject.truths, start=1)
                 for number, answer in truth.questions
             )
+        started = datetime.now().astimezone()
+        # 응답에는 문항을 옮겨 적은 글이 있다. 사용자의 파일로 잴 때는 적어 두지 않는다.
+        checkpoint = (
+            None
+            if subject.custom
+            else Checkpoint(checkpoint_path(out, loaded.name), started, resume)
+        )
+        if resume and checkpoint is not None:
+            typer.echo(
+                f"이어 하기: 받아 둔 응답 {len(checkpoint)}건이 있다. 같은 호출은 다시 하지 않는다."
+            )
         if cloud:
             _confirm_cloud(loaded, subject, cloud, yes, only)
-        report = run_verification(
-            loaded,
-            subject,
-            clients + cloud,
-            now=datetime.now().astimezone(),
-            skipped=skipped,
-            # 워터마크가 든 프로파일은 고정된 가짜 번호의 무늬로 잰다. 무늬가 판독에 주는 영향을 보기 위해서다.
-            transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY, key),
-            answer_key=key is not None,
-            only=only,
-            replies=replies,
+        everyone = clients + cloud
+        progress = Progress(
+            sum(estimate_calls(loaded, len(subject.truths), model, only) for model in everyone),
+            "모델 호출",
         )
+        try:
+            report = run_verification(
+                loaded,
+                subject,
+                [
+                    cast(ModelClient, Tracked(model, checkpoint, progress.step))
+                    for model in everyone
+                ],
+                now=started,
+                skipped=skipped,
+                # 워터마크가 든 프로파일은 고정된 가짜 번호의 무늬로 잰다. 무늬가 판독에 주는 영향을 보기 위해서다.
+                transform=lambda pdf: protect_bytes(pdf, loaded, None, VERIFY_WATERMARK_KEY, key),
+                answer_key=key is not None,
+                only=only,
+                replies=replies,
+            )
+        finally:
+            progress.close()
+        failed_calls = sum(row["errors"] for row in report["results"])
+        if checkpoint is not None:
+            if checkpoint.reused:
+                report["notes"].append(
+                    f"이어 하기로, 앞선 실행(24시간 안)에서 받아 둔 응답 {checkpoint.reused}건을 썼다."
+                )
+            if not failed_calls:
+                checkpoint.discard()
         path = write_report(report, out)
         replies_path = write_replies(replies, path) if replies is not None else None
     except ExamShieldError as error:
@@ -391,6 +435,12 @@ def verify(
     if verdict:
         typer.echo("\n" + verdict)
     typer.echo(f"\n리포트: {path}")
+    if checkpoint is not None and failed_calls:
+        typer.echo(
+            f"오류가 난 호출이 {failed_calls}건 있다. 같은 명령에 --resume을 붙여 다시 실행하면 "
+            "받은 응답은 그대로 쓰고 그 호출만 다시 한다.",
+            err=True,
+        )
     if replies and replies_path is not None:
         typer.echo("\n" + format_replies(replies))
         typer.echo(f"응답 글: {replies_path}")
@@ -563,6 +613,11 @@ def protect(
         "--jobs",
         help="--copies에서 복사본을 만들 프로세스 수. 없으면 코어 수와 복사본 수를 보고 고른다. 1이면 하나씩 만든다.",
     ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="--copies가 중간에 끊겼을 때 이미 만든 복사본은 두고 나머지만 만든다. 입력, 프로파일, 시드가 같아야 한다.",
+    ),
 ) -> None:
     failed = 0
     loaded: Profile | None = None
@@ -578,12 +633,16 @@ def protect(
                 raise ExamShieldError(f"정답표를 출력 폴더 안에 둘 수 없다: {answer_key}")
             answers = read_answer_key(answer_key)
         if copies is not None:
-            _protect_copies(sources, out, loaded, seed_file, force, copies, map_file, answers, jobs)
+            _protect_copies(
+                sources, out, loaded, seed_file, force, copies, map_file, answers, jobs, resume
+            )
             return
         if map_file is not None:
             raise ExamShieldError("--map-file은 --copies와 함께 쓴다.")
         if jobs is not None:
             raise ExamShieldError("--jobs는 --copies와 함께 쓴다.")
+        if resume:
+            raise ExamShieldError("--resume은 --copies와 함께 쓴다.")
         if out.exists() and not out.is_dir():
             raise ExamShieldError(f"--out은 폴더여야 한다: {out}")
         # 대소문자나 유니코드 정규화만 다른 경로도 같은 폴더로 잡으려고 samefile로 비교한다.
@@ -672,6 +731,7 @@ def _protect_copies(
     map_file: Path | None,
     answers: AnswerKey | None = None,
     jobs: int | None = None,
+    resume: bool = False,
 ) -> None:
     if len(sources) != 1:
         raise ExamShieldError("--copies는 파일 하나에만 쓴다. 폴더는 받지 않는다.")
@@ -697,9 +757,12 @@ def _protect_copies(
     existing = [str(path) for path in targets if path.exists() or job_path(path).exists()]
     if table.exists():
         existing.append(str(table))
-    if existing and not force:
+    if existing and not force and not resume:
         shown = ", ".join(existing[:5]) + (" 외" if len(existing) > 5 else "")
-        raise ExamShieldError(f"이미 같은 이름의 파일이 있다. 덮어쓰려면 --force를 준다: {shown}")
+        raise ExamShieldError(
+            "이미 같은 이름의 파일이 있다. 끊긴 실행을 이어 하려면 --resume을, "
+            f"처음부터 덮어쓰려면 --force를 준다: {shown}"
+        )
     # 이번 목록에 없는 예전 복사본이 남으면 매핑표와 폴더가 어긋난다. 지우지는 않고 멈춘다.
     wanted = {path.name for path in targets}
     stale = sorted(
@@ -712,26 +775,47 @@ def _protect_copies(
             "출력 폴더에 이번 수험번호 목록에 없는 복사본이 있다. 치우거나 새 폴더를 쓴다: "
             + ", ".join(stale[:5])
         )
-    # 매핑표를 쓸 수 있는지 복사본을 만들기 전에 확인한다. 복사본만 남고 매핑표가 없으면 추적할 수 없다.
-    write_map(table, [])
     engine = find_tesseract()
     original = read_document(source, out)
-    base_check, made = protect_copies(
-        original, profile, seed, ids, engine.read if engine else None, answers, jobs
+    kept = (
+        reusable_rows(table, out, source.stem, ids, seed, original, profile, answers is not None)
+        if resume
+        else {}
     )
-    if not base_check.passed:
-        typer.echo(f"{source.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
-        typer.echo(format_result(base_check), err=True)
-        raise typer.Exit(1)
-    rows = []
-    for copy in made:
-        append_log(out, copy.protected, copy.check.passed, datetime.now().astimezone())
-        if not copy.check.passed:
-            typer.echo(f"{copy.examinee_id}: 워터마크 검사 실패. 중단한다.", err=True)
-            typer.echo(format_result(copy.check), err=True)
+    # 매핑표를 쓸 수 있는지 복사본을 만들기 전에 확인한다. 복사본만 남고 매핑표가 없으면 추적할 수 없다.
+    # 만드는 동안에도 복사본마다 한 줄씩 보탠다. 끊겨도 그때까지 만든 것은 추적하고 이어 할 수 있다.
+    write_map(table, list(kept.values()))
+    todo = [examinee for examinee in ids if examinee not in kept]
+    if resume:
+        typer.echo(
+            f"이어 하기: 이미 만든 복사본 {len(kept)}개는 그대로 두고 {len(todo)}개를 만든다."
+        )
+    made_rows = dict(kept)
+    if todo:
+        base_check, made = protect_copies(
+            original, profile, seed, todo, engine.read if engine else None, answers, jobs
+        )
+        if not base_check.passed:
+            typer.echo(f"{source.name}: 검사 실패. 복사본을 쓰지 않았다.", err=True)
+            typer.echo(format_result(base_check), err=True)
             raise typer.Exit(1)
-        written = write_outputs(copy.protected, out, f"{source.stem}-{copy.examinee_id}")
-        rows.append(map_row(copy, seed, written.name))
+        progress = Progress(len(ids), "복사본", already=len(kept))
+        try:
+            for copy in made:
+                append_log(out, copy.protected, copy.check.passed, datetime.now().astimezone())
+                if not copy.check.passed:
+                    progress.close()
+                    typer.echo(f"{copy.examinee_id}: 워터마크 검사 실패. 중단한다.", err=True)
+                    typer.echo(format_result(copy.check), err=True)
+                    raise typer.Exit(1)
+                written = write_outputs(copy.protected, out, f"{source.stem}-{copy.examinee_id}")
+                row = map_row(copy, seed, written.name)
+                append_map(table, row)
+                made_rows[copy.examinee_id] = row
+                progress.step()
+        finally:
+            progress.close()
+    rows = [made_rows[examinee] for examinee in ids]
     write_map(table, rows)
     typer.echo(f"{source.name} → {out}  복사본 {len(rows)}개, 모두 검사 통과")
     if needs_review(source):

@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import io
+import json
 import multiprocessing
 import os
 import re
@@ -16,6 +17,7 @@ from examshield.errors import ExamShieldError
 from examshield.pdfio import open_pdf_bytes, page_text
 from examshield.profiles import Profile
 from examshield.protect.pipeline import (
+    JOB_SUFFIX,
     KEYED,
     TECHNIQUES,
     AnswerKey,
@@ -339,6 +341,64 @@ def write_map(path: Path, rows: list[MapRow]) -> None:
             writer.writerow(
                 [row.examinee_id, row.code, row.file, row.output_sha256, row.cell_pt, row.kind]
             )
+
+
+def append_map(path: Path, row: MapRow) -> None:
+    """만든 복사본을 하나씩 매핑표에 보탠다. 중간에 끊겨도 그때까지 만든 것은 추적할 수 있다."""
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerow(
+            [row.examinee_id, row.code, row.file, row.output_sha256, row.cell_pt, row.kind]
+        )
+
+
+def reusable_rows(
+    table: Path,
+    out_dir: Path,
+    stem: str,
+    examinee_ids: list[str],
+    seed: bytes,
+    pdf: bytes,
+    profile: Profile,
+    answer_key: bool,
+) -> dict[str, MapRow]:
+    """끊긴 실행이 남긴 복사본 가운데 그대로 써도 되는 것. 수험번호 → 매핑표의 행.
+
+    매핑표에 적혀 있고, 그 코드가 지금 시드에서 나온 것이며, 파일이 적힌 해시 그대로이고,
+    작업 기록의 원본과 프로파일이 지금 것과 같을 때만 쓴다. 하나라도 어긋나면 다시 만든다.
+    """
+    try:
+        rows = read_map(table)
+    except ExamShieldError:
+        return {}
+    kind, _ = keyed_technique(profile)
+    wanted = set(examinee_ids)
+    input_sha256 = sha256_hex(pdf)
+    kept: dict[str, MapRow] = {}
+    for row in rows:
+        examinee = row.examinee_id
+        if examinee not in wanted or row.kind != kind:
+            continue
+        if row.file != f"{stem}-{examinee}.pdf":
+            continue
+        if row.code != watermark.code_of(watermark.derive_key(seed, examinee)):
+            continue
+        path = out_dir / row.file
+        record_path = path.with_name(path.stem + JOB_SUFFIX)
+        try:
+            if sha256_hex(path.read_bytes()) != row.output_sha256:
+                continue
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            same = (
+                record["output_sha256"] == row.output_sha256
+                and record["input_sha256"] == input_sha256
+                and record["profile"]["sha256"] == profile.sha256
+                and bool(record.get("answer_key")) == answer_key
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if same:
+            kept[examinee] = row
+    return kept
 
 
 def read_map(path: Path) -> list[MapRow]:
