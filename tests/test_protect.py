@@ -546,3 +546,17 @@ def test_bad_question_keys_are_refused(
     code, output = run_protect(sample_file, tmp_path / "out", "a-decoy", "--answer-key", str(key))
 
     assert code == 2 and message in output
+
+
+def test_the_decoy_font_is_made_once_for_the_same_set_of_characters() -> None:
+    from examshield.protect.techniques import decoy  # noqa: PLC0415
+
+    decoy._subset_for.cache_clear()
+    first = decoy.subset_font("정답은 3번이다 1")
+    again = decoy.subset_font("1번이다 정답은 3")
+    other = decoy.subset_font("정답은 4번이다")
+
+    assert first == again and first != other
+    assert decoy._subset_for.cache_info().hits == 1
+    decoy._subset_for.cache_clear()
+    assert decoy.subset_font("정답은 3번이다 1") == first

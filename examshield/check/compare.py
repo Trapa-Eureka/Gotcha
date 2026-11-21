@@ -26,8 +26,9 @@ WATERMARK_SLACK = 2
 DOTS_PX_PER_PT = 2
 DOTS_CELL_RANGE = (4, 16)
 DOTS_INK_RANGE = (64, 255)
-# 무늬는 칸의 절반쯤에 점을 찍는다. 크게 벗어나면 무늬가 아니라 점으로 그린 그림일 수 있다.
-DOTS_FILL_RANGE = (0.35, 0.65)
+# 무늬는 칸의 절반쯤을 채운다. 절반에서 이만큼, 또는 우연으로 보기 어려울 만큼 벗어나면 받지 않는다.
+FILL_MARGIN = 0.15
+FILL_SIGMAS = 6
 SIZE_TOLERANCE = 0.01
 OCR_TOLERANCE = 0.02
 TEXT_PRESERVED = "preserved"
@@ -190,11 +191,19 @@ def compare(
         # 화면에는 안 보이고 인쇄에만 나오는 주석이 있다. 렌더링 비교로는 잡지 못해 개수로 본다.
         if len(list(before.annots())) != len(list(after.annots())):
             result.differences.append(f"{number}쪽: 주석의 개수가 다르다")
+        tolerance = expect.pixel_tolerance
         if expect.dots_cell_pt is not None:
             problem = _lift_dots(target, after, expect)
             if problem:
                 result.differences.append(f"{number}쪽: {problem}")
                 continue
+        elif expect.overlay_images:
+            problem = _lift_watermark(target, after, expect)
+            if problem:
+                result.differences.append(f"{number}쪽: {problem}")
+                continue
+            # 무늬를 걷어 냈으니 남은 쪽은 무늬를 넣기 전과 같아야 한다.
+            tolerance = PIXEL_TOLERANCE
         decoy = expect.decoys[number - 1] if expect.decoys else ""
         if not _same_text(page_text(before), page_text(after), decoy):
             text_same = False
@@ -204,24 +213,18 @@ def compare(
         if left.shape != right.shape:
             result.differences.append(f"{number}쪽: 렌더링 크기가 다르다")
             continue
-        delta = np.abs(left.astype(np.int16) - right.astype(np.int16)).max(axis=2)
-        if (
-            expect.overlay_images
-            and expect.dots_cell_pt is None
-            and not _looks_like_watermark(left, right, expect, dpi)
-        ):
-            result.differences.append(
-                f"{number}쪽: 덧씌운 무늬가 워터마크 격자 모양이 아니다. 다른 내용이 옅게 들어갔을 수 있다"
-            )
+        gap = np.abs(left.astype(np.int16) - right.astype(np.int16))
+        # 채널 셋 가운데 가장 큰 차이. max(axis=2)와 같은 값인데 훨씬 빠르다.
+        delta = np.maximum(np.maximum(gap[:, :, 0], gap[:, :, 1]), gap[:, :, 2])
         page_max = int(delta.max())
         if page_max:
             redrawn.append(number - 1)
         max_diff = max(max_diff, page_max)
-        changed += int((delta > expect.pixel_tolerance).sum())
+        changed += int((delta > tolerance).sum())
         total += int(delta.size)
-        if page_max > expect.pixel_tolerance:
+        if page_max > tolerance:
             result.differences.append(
-                f"{number}쪽: 렌더링이 다르다 (최대 밝기 차이 {page_max}/255, 허용 {expect.pixel_tolerance})"
+                f"{number}쪽: 렌더링이 다르다 (최대 밝기 차이 {page_max}/255, 허용 {tolerance})"
             )
     result.visual_max_diff = max_diff
     result.visual_changed_ratio = changed / total if total else 0.0
@@ -249,17 +252,58 @@ def _lift_dots(doc: Any, page: Any, expect: Expectation) -> str | None:
     cell, ink = expect.dots_cell_pt, expect.dots_ink
     if cell is None or ink is None:
         return "도트 무늬 값이 없다"
+    step = cell * DOTS_PX_PER_PT
+
+    def problem_in(alpha: NDArray[np.uint8]) -> str | None:
+        lattice = np.zeros(alpha.shape, dtype=bool)
+        lattice[step // 2 :: step, step // 2 :: step] = True
+        if np.any(alpha[~lattice]) or np.any((alpha != 0) & (alpha != ink)):
+            return "도트 무늬에 칸 가운데가 아닌 점이나 다른 진하기의 점이 있다"
+        return None
+
+    return _lift_overlay(doc, page, cell, step, "도트 무늬", problem_in)
+
+
+def _lift_watermark(doc: Any, page: Any, expect: Expectation) -> str | None:
+    """워터마크 그림이 약속한 모양인지 확인하고 쪽에서 걷어 낸다. 문제가 있으면 그 내용을 돌려준다.
+
+    약속한 모양: 쪽 전체를 덮는 그림 한 장, 화소 하나가 칸 하나, 칸은 '그대로'이거나 기록된 세기 하나뿐.
+    걷어 낸 뒤의 쪽은 무늬를 넣기 전과 픽셀 단위로 같아야 한다(호출한 쪽에서 비교한다).
+    렌더링한 그림에서 칸을 재는 대신 그림 자체를 읽으므로, 칸 가장자리나 글자가 있는 칸에 숨긴
+    옅은 내용도 걸린다. 칸 단위로 그린 큰 글자나 그림은 무늬와 구별하지 못한다.
+    """
+    cell = expect.overlay_cell_pt
+    if cell is None:
+        return "덧씌운 그림이 있는데 워터마크 칸 크기가 기록돼 있지 않다"
+    strength = expect.pixel_tolerance - WATERMARK_SLACK
+
+    def problem_in(alpha: NDArray[np.uint8]) -> str | None:
+        if np.any((alpha != 0) & (alpha != strength)):
+            return "워터마크에 기록된 세기와 다른 칸이 있다. 다른 내용이 옅게 들어갔을 수 있다"
+        return None
+
+    return _lift_overlay(doc, page, cell, 1, "워터마크", problem_in)
+
+
+def _lift_overlay(
+    doc: Any,
+    page: Any,
+    cell: int,
+    pixels_per_cell: int,
+    label: str,
+    problem_in: Callable[[NDArray[np.uint8]], str | None],
+) -> str | None:
     # 쪽들이 그림 자원을 같이 쓰는 문서에서는 그림 정보의 번호가 틀릴 수 있다.
     # 그래서 쪽의 마지막 내용 줄기가 "그림 하나를 쪽 전체에 그린다"인지 직접 읽는다.
     contents = page.get_contents()
     drawn = OVERLAY_DRAW.fullmatch(doc.xref_stream(contents[-1])) if contents else None
     if drawn is None:
-        return "쪽의 마지막에 그려진 것이 도트 무늬 그림 한 장이 아니다"
+        return f"쪽의 마지막에 그려진 것이 {label} 그림 한 장이 아니다"
     # 이름은 쪽 자신의 자원에서 직접 찾는다. 다른 그림 묶음 안에 든 같은 이름의 그림이나,
     # 글자를 그리는 묶음(Form)을 무늬 그림인 것처럼 내세우는 것을 막는다.
     image_xref = _page_image(doc, page, drawn.group("name").decode("ascii"))
     if image_xref is None:
-        return "도트 무늬 자리에 그려진 것이 쪽의 그림이 아니다"
+        return f"{label} 자리에 그려진 것이 쪽의 그림이 아니다"
     mask_ref = doc.xref_get_key(image_xref, "SMask")
     mask_xref = int(mask_ref[1].split()[0]) if mask_ref[0] == "xref" else 0
     rect = page.rect
@@ -267,26 +311,30 @@ def _lift_dots(doc: Any, page: Any, expect: Expectation) -> str | None:
     info = page.get_image_info()[-1]
     expected = (rect.x0, rect.y0, rect.x0 + cols * cell, rect.y0 + rows * cell)
     if any(abs(a - b) > SIZE_TOLERANCE for a, b in zip(info["bbox"], expected, strict=True)):
-        return "도트 무늬 그림이 쪽 전체를 덮는 자리에 있지 않다"
+        return f"{label} 그림이 쪽 전체를 덮는 자리에 있지 않다"
     try:
         base = pymupdf.Pixmap(doc, image_xref)
         mask = pymupdf.Pixmap(doc, mask_xref) if mask_xref else None
     except Exception:
-        return "도트 무늬 그림을 읽지 못했다"
-    step = cell * DOTS_PX_PER_PT
-    if mask is None or (mask.width, mask.height) != (cols * step, rows * step):
-        return "도트 무늬 그림의 크기가 맞지 않는다"
+        return f"{label} 그림을 읽지 못했다"
+    if mask is None or (mask.width, mask.height) != (
+        cols * pixels_per_cell,
+        rows * pixels_per_cell,
+    ):
+        return f"{label} 그림의 크기가 맞지 않는다"
     if mask.n != 1 or base.n != 1 or any(base.samples):
-        return "도트 무늬 그림이 검은 점만으로 되어 있지 않다"
+        return f"{label} 그림이 검은색만으로 되어 있지 않다"
     alpha = np.frombuffer(mask.samples, dtype=np.uint8).reshape(mask.height, mask.stride)
     alpha = alpha[:, : mask.width]
-    lattice = np.zeros(alpha.shape, dtype=bool)
-    lattice[step // 2 :: step, step // 2 :: step] = True
-    if np.any(alpha[~lattice]) or np.any((alpha != 0) & (alpha != ink)):
-        return "도트 무늬에 칸 가운데가 아닌 점이나 다른 진하기의 점이 있다"
-    filled = float(np.count_nonzero(alpha)) / (rows * cols)
-    if not DOTS_FILL_RANGE[0] <= filled <= DOTS_FILL_RANGE[1]:
-        return "도트 무늬의 점 개수가 무작위 무늬로 보기 어렵다"
+    problem = problem_in(alpha)
+    if problem:
+        return problem
+    # 무늬는 칸의 절반쯤을 채운다. 크게 벗어나면 무늬가 아니라 칸으로 그린 그림일 수 있다.
+    # 칸이 적은 작은 쪽은 우연히도 많이 벗어나므로 그만큼 넓게 본다.
+    count = rows * cols
+    filled = float(np.count_nonzero(alpha)) / count
+    if abs(filled - 0.5) > max(FILL_MARGIN, FILL_SIGMAS * 0.5 / count**0.5):
+        return f"{label}의 채워진 칸 수가 무작위 무늬로 보기 어렵다"
     # 내용 줄기는 쪽끼리 같이 쓸 수 있다. 줄기를 비우지 않고 이 쪽의 목록에서만 뺀다.
     kept = " ".join(f"{xref} 0 R" for xref in contents[:-1])
     doc.xref_set_key(page.xref, "Contents", f"[{kept}]")
@@ -311,85 +359,6 @@ def _page_image(doc: Any, page: Any, name: str) -> int | None:
     if doc.xref_get_key(xref, "Subtype") != ("name", "/Image"):
         return None
     return xref
-
-
-def _looks_like_watermark(
-    before: NDArray[np.uint8], after: NDArray[np.uint8], expect: Expectation, dpi: int
-) -> bool:
-    """빈 바탕의 칸마다 어두워진 정도가 고르고, 값이 '그대로'와 '무늬 세기' 두 가지뿐인지 본다.
-
-    옅은 글자나 그림을 덧씌우면 칸 안이 고르지 않거나 중간값이 나온다.
-    칸 단위로 그린 무늬는 워터마크와 구별하지 못한다.
-    """
-    cell = expect.overlay_cell_pt
-    if cell is None:
-        return False
-    strength = expect.pixel_tolerance - WATERMARK_SLACK
-    light = _darkest_channel(before)
-    darker = light.astype(np.int16) - _darkest_channel(after).astype(np.int16)
-    step = cell * dpi / 72.0
-    inset = step * 0.25
-    height, width = light.shape
-    rows = _cell_edges(int(height / step), step, inset, height)
-    cols = _cell_edges(int(width / step), step, inset, width)
-    if rows is None or cols is None:
-        return True
-    # 칸마다 가장 밝지 않은 값, 어두워진 정도의 최소·최대·평균을 한꺼번에 구한다.
-    # 수험번호가 수백 개면 이 검사가 복사본마다 돌아서, 칸마다 파이썬으로 돌면 느리다.
-    blank = _per_cell(np.minimum, light, rows, cols) >= 250
-    low = _per_cell(np.minimum, darker, rows, cols)
-    high = _per_cell(np.maximum, darker, rows, cols)
-    total = _per_cell(np.add, darker.astype(np.int64), rows, cols)
-    level = total / (rows.sizes[:, None] * cols.sizes[None, :])
-    uneven = (high - low) > 1
-    off_level = (np.abs(level) > 1.0) & (np.abs(level - strength) > 1.5)
-    return not bool(np.any(blank & (uneven | off_level)))
-
-
-@dataclass(frozen=True)
-class _Edges:
-    # 칸마다 [시작, 끝) 픽셀. cuts는 reduceat에 줄 경계(시작0, 끝0, 시작1, 끝1, ...)다.
-    cuts: NDArray[np.intp]
-    sizes: NDArray[np.int64]
-
-
-def _cell_edges(count: int, step: float, inset: float, limit: int) -> _Edges | None:
-    """칸의 가장자리 4분의 1씩을 뺀 안쪽 구간들. 칸이 없거나 구간이 비면 None."""
-    index = np.arange(count)
-    # 파이썬의 round와 같게 반올림한다(반은 짝수 쪽으로).
-    starts = np.rint(index * step + inset).astype(np.intp)
-    ends = np.rint((index + 1) * step - inset).astype(np.intp)
-    ends = np.minimum(ends, limit)
-    keep = ends > starts
-    starts, ends = starts[keep], ends[keep]
-    if starts.size == 0:
-        return None
-    cuts = np.column_stack([starts, ends]).ravel()
-    return _Edges(cuts=cuts, sizes=(ends - starts).astype(np.int64))
-
-
-def _per_cell(operation: Any, values: NDArray[Any], rows: _Edges, cols: _Edges) -> NDArray[Any]:
-    """칸마다 operation으로 줄인 값. 칸 사이의 띠는 버린다."""
-    reduced = _reduce(operation, values, rows.cuts, 0, values.shape[0])
-    result: NDArray[Any] = _reduce(operation, reduced, cols.cuts, 1, values.shape[1])
-    return result
-
-
-def _reduce(
-    operation: Any, values: NDArray[Any], cuts: NDArray[np.intp], axis: int, limit: int
-) -> NDArray[Any]:
-    # reduceat은 경계가 배열 끝과 같으면 받지 않는다. 마지막 구간은 어차피 끝까지다.
-    usable = cuts[:-1] if cuts[-1] >= limit else cuts
-    pieces: NDArray[Any] = operation.reduceat(values, usable, axis=axis)
-    return pieces[::2] if axis == 0 else pieces[:, ::2]
-
-
-def _darkest_channel(image: NDArray[np.uint8]) -> NDArray[np.uint8]:
-    """화소마다 세 채널 가운데 가장 어두운 값. image.min(axis=2)보다 빠르다."""
-    result: NDArray[np.uint8] = np.minimum(
-        np.minimum(image[:, :, 0], image[:, :, 1]), image[:, :, 2]
-    )
-    return result
 
 
 def _same_text(before: str, after: str, decoy: str) -> bool:

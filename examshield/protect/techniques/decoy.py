@@ -1,4 +1,5 @@
 import io
+from functools import lru_cache
 from typing import Any
 
 import pymupdf
@@ -34,13 +35,20 @@ def subset_font(text: str) -> bytes:
 
     글꼴을 문서에 심지 않으면 일부 추출기가 미끼 문구를 단어별로 쪼개 읽는다.
     """
+    return _subset_for("".join(sorted(set(text))))
+
+
+@lru_cache(maxsize=16)
+def _subset_for(characters: str) -> bytes:
+    # 글꼴은 쓰인 글자의 집합만으로 정해진다. --copies에서는 수험번호마다 미끼 번호만 달라서
+    # 글자 집합이 대개 같다. 한 번 만든 것을 다시 쓴다.
     font = TTFont(io.BytesIO(pymupdf.Font(SOURCE_FONT).buffer), recalcTimestamp=False)
     options = subset.Options()
     options.layout_features = []
     options.name_IDs = [1, 2, 4, 6]
     options.notdef_outline = True
     worker = subset.Subsetter(options)
-    worker.populate(text="".join(sorted(set(text))))
+    worker.populate(text=characters)
     worker.subset(font)
     buffer = io.BytesIO()
     font.save(buffer)

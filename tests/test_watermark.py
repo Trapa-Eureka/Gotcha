@@ -431,8 +431,91 @@ def test_a_faint_message_passed_off_as_the_watermark_fails_the_check(sample_pdf:
     claimed = Expectation(overlay_images=1, pixel_tolerance=8, overlay_cell_pt=8)
     result = compare(sample_pdf, forged, claimed)
 
-    assert result.visual_max_diff is not None and result.visual_max_diff <= 8
-    assert any("격자 모양이 아니다" in entry for entry in result.differences)
+    assert not result.passed
+    assert any("워터마크 그림" in entry for entry in result.differences)
+
+
+def watermarked(sample_pdf: bytes) -> tuple[bytes, Expectation]:
+    made = protect_bytes(sample_pdf, load_profile("a-watermark"), None, b"k" * 32)
+    return made.pdf, made.expectation
+
+
+def repaint_watermark(pdf: bytes, change: object) -> bytes:
+    """첫 쪽의 워터마크 그림을 고친 것으로 바꿔 그린다. 크기와 자리는 그대로다."""
+    import pymupdf  # noqa: PLC0415
+
+    doc = open_pdf_bytes(pdf)
+    page = doc[0]
+    rows, cols = watermark.grid_shape(page.rect.width, page.rect.height, 8)
+    alpha = np.where(watermark.pattern(b"k" * 32, 0, rows, cols), 6, 0).astype(np.uint8)
+    change(alpha)  # type: ignore[operator]
+    samples = np.zeros((rows, cols, 2), dtype=np.uint8)
+    samples[..., 1] = alpha
+    doc.update_stream(page.get_contents()[-1], b" ")
+    pixmap = pymupdf.Pixmap(pymupdf.csGRAY, cols, rows, samples.tobytes(), True)
+    page.insert_image(pymupdf.Rect(0, 0, cols * 8, rows * 8), pixmap=pixmap, overlay=True)
+    return save_deterministic(doc)
+
+
+def test_a_real_watermark_passes_and_is_compared_exactly_once_lifted(sample_pdf: bytes) -> None:
+    copy, expectation = watermarked(sample_pdf)
+
+    result = compare(sample_pdf, copy, expectation)
+
+    assert result.passed, result.differences
+    # 무늬를 걷어 낸 쪽을 견주므로, 무늬의 세기(6)만큼의 차이는 더는 보이지 않는다.
+    assert result.visual_max_diff is not None and result.visual_max_diff <= 2
+
+
+def test_a_cell_of_another_strength_fails_the_check(sample_pdf: bytes) -> None:
+    copy, expectation = watermarked(sample_pdf)
+
+    def one_cell(alpha: np.ndarray) -> None:  # type: ignore[type-arg]
+        alpha[10, 10] = 3
+
+    result = compare(sample_pdf, repaint_watermark(copy, one_cell), expectation)
+
+    assert any("세기와 다른 칸" in entry for entry in result.differences)
+
+
+def test_a_watermark_that_is_not_random_fails_the_check(sample_pdf: bytes) -> None:
+    copy, expectation = watermarked(sample_pdf)
+
+    def all_dark(alpha: np.ndarray) -> None:  # type: ignore[type-arg]
+        alpha[:] = 6
+
+    result = compare(sample_pdf, repaint_watermark(copy, all_dark), expectation)
+
+    assert any("무작위 무늬" in entry for entry in result.differences)
+
+
+def faint_line_under_the_watermark(pdf: bytes, top: float) -> bytes:
+    """워터마크 아래(먼저 그려지는 자리)에 아주 옅은 가는 줄을 넣는다. 칸 가장자리에 걸치게 한다."""
+    import pymupdf  # noqa: PLC0415
+
+    doc = open_pdf_bytes(pdf)
+    for page in doc:
+        shade = 1 - 4 / 255
+        page.draw_rect(
+            pymupdf.Rect(40, top, 400, top + 1.5),
+            color=None,
+            fill=(shade, shade, shade),
+            overlay=False,
+        )
+    return save_deterministic(doc)
+
+
+@pytest.mark.parametrize("top", [319.5, 323.0, 327.6])
+def test_faint_content_hidden_at_the_edge_of_cells_fails_the_check(
+    sample_pdf: bytes, top: float
+) -> None:
+    """예전 검사는 렌더링에서 칸 안쪽만 봐서, 칸 가장자리에 걸친 옅은 획을 놓쳤다."""
+    copy, expectation = watermarked(sample_pdf)
+
+    result = compare(sample_pdf, faint_line_under_the_watermark(copy, top), expectation)
+
+    assert not result.passed
+    assert any("렌더링이 다르다" in entry for entry in result.differences)
 
 
 def test_ids_that_differ_only_in_case_are_refused(tmp_path: Path) -> None:

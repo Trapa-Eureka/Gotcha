@@ -145,7 +145,7 @@ def text_on_top(doc: Any) -> None:
     [
         (lambda doc: repaint_overlay(doc, off_lattice), "칸 가운데가 아닌 점"),
         (lambda doc: repaint_overlay(doc, wrong_ink), "다른 진하기"),
-        (lambda doc: repaint_overlay(doc, gray_dots), "검은 점만"),
+        (lambda doc: repaint_overlay(doc, gray_dots), "검은색만"),
         (text_on_top, "마지막에 그려진 것"),
         (
             lambda doc: doc[0].draw_rect(pymupdf.Rect(300, 600, 301, 601), color=(0.5,) * 3),
@@ -639,7 +639,7 @@ def too_many_dots(doc: Any) -> None:
         (another_image_under_the_name, ""),
         (print_only_note, "주석"),
         (hidden_layer, ""),
-        (too_many_dots, "점 개수"),
+        (too_many_dots, "채워진 칸 수"),
     ],
     ids=["form-xobject", "same-name-image", "print-only-annotation", "hidden-layer", "dense"],
 )
