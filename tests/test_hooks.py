@@ -33,7 +33,7 @@ def bash(command: str) -> dict[str, object]:
         "git push -f",
         "git reset --hard HEAD~1",
         "git clean -fd",
-        "git add docs/paid-plans.md",
+        "git add docs/notes.md",
         "git add -f out/copy.pdf",
         "git add .env",
         "git add secrets/exam.seed",

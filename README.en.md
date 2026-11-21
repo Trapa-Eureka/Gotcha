@@ -2,6 +2,8 @@
 
 <img src="assets/gotcha.png" alt="Gotcha" width="300">
 
+<sub>The picture above is one that circulates widely online as a meme. If you hold the rights to it and this use infringes them, please say so in an [issue](https://github.com/Trapa-Eureka/Gotcha/issues) or at the contact address below, and it will be removed right away.</sub>
+
 An offline CLI that reworks an exam document on your machine (PDF, Word, Hangul HWP) while keeping its content the same, so that copying its text into an AI is blocked and a leaked copy can be traced to whose it was, and shows the effect with numbers stamped with a date and model versions.
 
 > **Status: early development (implemented through Phase 7; checks against real AI, real printing and photographing, and an air-gapped PC are still open).**
@@ -313,3 +315,5 @@ The project is at an early stage. Please open an issue to discuss a change befor
 [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). PyMuPDF, which does the PDF work, is AGPL, so distributing this tool means following the AGPL anyway; the same license was chosen to match. If you distribute a modified version or offer it as a network service, you must publish your modified source under the same terms.
 
 Using it without publishing source needs separate permission from the copyright holder of this repository, and a commercial PyMuPDF license bought from Artifex. No such commercial license is on sale. This paragraph is not legal advice.
+
+Contact: 1982gaya@gmail.com · How to report a security problem is in [SECURITY.md](SECURITY.md).
