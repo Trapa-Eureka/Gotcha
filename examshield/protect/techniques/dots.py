@@ -13,7 +13,7 @@ import pymupdf
 from numpy.typing import NDArray
 
 from examshield.errors import ExamShieldError
-from examshield.pdfio import open_pdf_bytes, save_deterministic
+from examshield.pdfio import open_pdf_bytes, own_contents, save_deterministic
 from examshield.protect.techniques import watermark
 from examshield.protect.techniques.base import Context, Outcome
 
@@ -90,6 +90,7 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         )
         corner = page.rect.tl
         area = pymupdf.Rect(corner.x, corner.y, corner.x + cols * cell, corner.y + rows * cell)
+        own_contents(doc, page)
         page.insert_image(area, pixmap=pixmap, overlay=True)
         marked += int(bits.sum())
         total += alpha.size

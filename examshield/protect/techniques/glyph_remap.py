@@ -188,16 +188,26 @@ def probe_font(pdf: bytes, font_xref: int, code_bytes: int) -> Mapping:
     return mapping
 
 
+def font_xrefs(doc: Any) -> list[int]:
+    """글자 대응표를 가질 수 있는 글꼴 객체의 번호."""
+    fonts: list[int] = []
+    for xref in range(1, doc.xref_length()):
+        try:
+            kind = doc.xref_get_key(xref, "Type")[1]
+            subtype = doc.xref_get_key(xref, "Subtype")[1] if kind == "/Font" else ""
+        except Exception:
+            # 실제 문서에는 객체 목록에 번호만 있고 내용이 없는 객체가 있다. 글꼴일 수 없으니 넘어간다.
+            continue
+        if kind != "/Font" or subtype in ("/CIDFontType0", "/CIDFontType2"):
+            continue
+        fonts.append(xref)
+    return fonts
+
+
 def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
     keep = read_keep(params)
     doc = open_pdf_bytes(pdf)
-    fonts: list[int] = []
-    for xref in range(1, doc.xref_length()):
-        if doc.xref_get_key(xref, "Type")[1] != "/Font":
-            continue
-        if doc.xref_get_key(xref, "Subtype")[1] in ("/CIDFontType0", "/CIDFontType2"):
-            continue
-        fonts.append(xref)
+    fonts = font_xrefs(doc)
     done: dict[int, int] = {}
     scrambled = 0
     changed = 0

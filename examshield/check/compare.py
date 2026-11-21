@@ -172,7 +172,12 @@ def compare(
     if expect.decoys and len(expect.decoys) != target.page_count:
         raise ExamShieldError("작업 기록의 미끼 수가 쪽수와 다르다.")
     # 꺼진 레이어의 내용은 렌더링에 안 나오지만 인쇄 설정에 따라 찍힐 수 있다.
-    if len(source.get_ocgs()) != len(target.get_ocgs()):
+    # 이미지화한 복사본은 쪽이 그림 한 장이라 레이어가 없어야 한다.
+    if (
+        len(target.get_ocgs())
+        if expect.flattened_dpi is not None
+        else not _same_layer_count(source, target)
+    ):
         result.differences.append("선택 표시 레이어(OCG)의 개수가 다르다")
 
     text_same = True
@@ -197,11 +202,14 @@ def compare(
             if problem:
                 result.differences.append(f"{number}쪽: {problem}")
                 continue
+            after = target.reload_page(after)
         elif expect.overlay_images:
             problem = _lift_watermark(target, after, expect)
             if problem:
                 result.differences.append(f"{number}쪽: {problem}")
                 continue
+            # 자원을 고쳤으니 쪽을 다시 읽어야 렌더러가 고친 것을 본다.
+            after = target.reload_page(after)
             # 무늬를 걷어 냈으니 남은 쪽은 무늬를 넣기 전과 같아야 한다.
             tolerance = PIXEL_TOLERANCE
         decoy = expect.decoys[number - 1] if expect.decoys else ""
@@ -240,6 +248,22 @@ def compare(
             "텍스트 레이어를 교란하는 프로파일로 만든 복사본이면 작업 기록(.job.json)을 --job으로 준다."
         )
     return result
+
+
+def _same_layer_count(source: Any, target: Any) -> bool:
+    """선택 표시 레이어의 개수가 같은지 본다.
+
+    복사본은 저장할 때 내용이 똑같은 객체를 하나로 합친다. 이름과 설정이 같은 레이어가 여럿인
+    문서는 그래서 개수가 준다. 개수가 다르면 원본도 같은 방식으로 저장해 놓고 다시 센다.
+    """
+    wanted = len(target.get_ocgs())
+    if len(source.get_ocgs()) == wanted:
+        return True
+    try:
+        saved = open_pdf_bytes(bytes(source.tobytes(garbage=4, deflate=True, no_new_id=True)))
+    except Exception:
+        return False
+    return len(saved.get_ocgs()) == wanted
 
 
 def _lift_dots(doc: Any, page: Any, expect: Expectation) -> str | None:
@@ -335,10 +359,53 @@ def _lift_overlay(
     filled = float(np.count_nonzero(alpha)) / count
     if abs(filled - 0.5) > max(FILL_MARGIN, FILL_SIGMAS * 0.5 / count**0.5):
         return f"{label}의 채워진 칸 수가 무작위 무늬로 보기 어렵다"
+    if not _forget_image(doc, page, drawn.group("name").decode("ascii")):
+        return f"{label} 그림을 쪽의 자원에서 빼지 못했다"
     # 내용 줄기는 쪽끼리 같이 쓸 수 있다. 줄기를 비우지 않고 이 쪽의 목록에서만 뺀다.
     kept = " ".join(f"{xref} 0 R" for xref in contents[:-1])
     doc.xref_set_key(page.xref, "Contents", f"[{kept}]")
     return None
+
+
+def _forget_image(doc: Any, page: Any, name: str) -> bool:
+    """쪽의 자원 목록에서 그 그림의 이름을 뺀다.
+
+    반투명 그림이 자원 목록에 남아 있으면, 그리지 않아도 렌더러가 쪽을 다른 방식(투명 묶음)으로
+    그려서 가는 선의 가장자리가 몇 화소 달라진다. 자원은 쪽끼리 같이 쓸 수 있으므로 원래 것을
+    고치지 않고, 이 쪽만 쓰는 사본을 만들어 거기서 뺀다.
+    """
+    owner = page.xref
+    for _ in range(32):
+        kind, value = doc.xref_get_key(owner, "Resources")
+        if kind != "null":
+            break
+        parent = doc.xref_get_key(owner, "Parent")
+        if parent[0] != "xref":
+            return False
+        owner = int(parent[1].split()[0])
+    else:
+        return False
+    if kind == "xref":
+        resources = doc.xref_object(int(value.split()[0]), compressed=True)
+    elif kind == "dict":
+        resources = value
+    else:
+        return False
+    private = doc.get_new_xref()
+    doc.update_object(private, resources)
+    kind, value = doc.xref_get_key(private, "XObject")
+    if kind == "xref":
+        images = doc.xref_object(int(value.split()[0]), compressed=True)
+    elif kind == "dict":
+        images = value
+    else:
+        return False
+    entry = re.compile(r"/" + re.escape(name) + r"\s+\d+\s+\d+\s+R")
+    if len(entry.findall(images)) != 1:
+        return False
+    doc.xref_set_key(private, "XObject", entry.sub("", images))
+    doc.xref_set_key(page.xref, "Resources", f"{private} 0 R")
+    return True
 
 
 def _page_image(doc: Any, page: Any, name: str) -> int | None:

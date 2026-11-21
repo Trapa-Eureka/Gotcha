@@ -20,7 +20,17 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
     for page in source:
         pixmap = page.get_pixmap(dpi=dpi, colorspace=pymupdf.csRGB, alpha=False)
         copy = target.new_page(width=page.rect.width, height=page.rect.height)
-        copy.insert_image(copy.rect, pixmap=pixmap)
+        # 그림의 화소가 그 해상도의 화면 화소와 하나씩 맞게 놓는다. 쪽 크기는 화소로 딱 떨어지지
+        # 않는 일이 많아서, 그림을 쪽에 꼭 맞게 줄이면 다시 그릴 때 글자 가장자리가 달라진다.
+        # 그림은 쪽보다 한 화소 미만으로 넘치고, 넘친 부분은 쪽 밖이라 보이지 않는다.
+        corner = copy.rect.tl
+        area = pymupdf.Rect(
+            corner.x,
+            corner.y,
+            corner.x + pixmap.width * 72.0 / dpi,
+            corner.y + pixmap.height * 72.0 / dpi,
+        )
+        copy.insert_image(area, pixmap=pixmap, keep_proportion=False)
     return Outcome(
         pdf=save_deterministic(target),
         stats={"dpi": dpi, "pages": source.page_count},

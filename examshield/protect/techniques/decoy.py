@@ -7,7 +7,7 @@ from fontTools import subset
 from fontTools.ttLib import TTFont
 
 from examshield.errors import ExamShieldError
-from examshield.pdfio import open_pdf_bytes, save_deterministic
+from examshield.pdfio import open_pdf_bytes, own_contents, save_deterministic
 from examshield.protect.seed import SeedStream
 from examshield.protect.techniques.base import Context, Outcome
 
@@ -115,6 +115,7 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
     font = subset_font("".join(texts))
     for page, text in zip(doc, texts, strict=True):
         corner = page.rect.tl
+        own_contents(doc, page)
         page.insert_font(fontname=HIDDEN_FONT, fontbuffer=font)
         page.insert_text(
             (corner.x + 12, corner.y + 12),

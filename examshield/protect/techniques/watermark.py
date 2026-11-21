@@ -8,7 +8,7 @@ import pymupdf
 from numpy.typing import NDArray
 
 from examshield.errors import ExamShieldError
-from examshield.pdfio import open_pdf_bytes, save_deterministic
+from examshield.pdfio import open_pdf_bytes, own_contents, save_deterministic
 from examshield.protect.techniques.base import Context, Outcome
 
 DEFAULT_CELL_PT = 8
@@ -72,6 +72,7 @@ def apply(pdf: bytes, params: dict[str, Any], context: Context) -> Outcome:
         pixmap = pymupdf.Pixmap(pymupdf.csGRAY, cols, rows, samples.tobytes(), True)
         corner = page.rect.tl
         area = pymupdf.Rect(corner.x, corner.y, corner.x + cols * cell, corner.y + rows * cell)
+        own_contents(doc, page)
         page.insert_image(area, pixmap=pixmap, overlay=True)
     return Outcome(
         pdf=save_deterministic(doc),

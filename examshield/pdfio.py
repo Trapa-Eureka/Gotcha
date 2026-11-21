@@ -25,6 +25,20 @@ def read_pdf(path: Path) -> Any:
         return open_pdf_bytes(handle.read())
 
 
+def own_contents(doc: Any, page: Any) -> None:
+    """쪽의 내용 줄기 목록을 이 쪽만 쓰게 한다. 쪽에 무언가를 그려 넣기 전에 부른다.
+
+    펼침면을 쪽 여럿으로 나눈 문서는 쪽들이 내용 줄기 목록 하나를 같이 쓴다. 그대로 그려 넣으면
+    한 쪽에 넣은 것이 같이 쓰는 모든 쪽에 들어간다.
+    """
+    kind, value = doc.xref_get_key(page.xref, "Contents")
+    if kind != "xref":
+        return
+    shared = doc.xref_object(int(value.split()[0]), compressed=True)
+    if shared.lstrip().startswith("["):
+        doc.xref_set_key(page.xref, "Contents", shared)
+
+
 def save_deterministic(doc: Any) -> bytes:
     doc.set_metadata({})
     return bytes(doc.tobytes(garbage=4, deflate=True, no_new_id=True))
